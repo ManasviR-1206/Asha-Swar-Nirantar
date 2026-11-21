@@ -1,0 +1,38 @@
+[
+  {
+    "audio_path": "samples/kanglish_01.wav",
+    "reference_transcript": "Meena ge four months pregnancy ide.",
+    "hypothesis_transcript": "",
+    "language_hint": "kn-IN,en-IN",
+    "script": "latin",
+    "accent": "karnataka_kannada",
+    "code_mix": "kanglish",
+    "noise": "quiet",
+    "speed": "natural",
+    "mid_sentence_switch": true,
+    "speaker_consent": true,
+    "speaker_id": "anon_consenting_01",
+    "expected_fields": {
+      "beneficiary_name": "Meena",
+      "weeks_pregnant": 16
+    },
+    "notes": "Consenting speaker. Do not include PII in shared reports."
+  },
+  {
+    "audio_path": "samples/kannada_english_medical_02.wav",
+    "reference_transcript": "Avrige Hb nine point five ide.",
+    "hypothesis_transcript": "",
+    "language_hint": "kn-IN,en-IN",
+    "script": "latin",
+    "accent": "karnataka_kannada",
+    "code_mix": "kanglish",
+    "noise": "quiet",
+    "speed": "natural",
+    "mid_sentence_switch": true,
+    "speaker_consent": true,
+    "speaker_id": "anon_consenting_02",
+    "expected_fields": {
+      "hemoglobin": 9.5
+    }
+  }
+]

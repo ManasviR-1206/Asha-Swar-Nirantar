@@ -20,3 +20,14 @@ build/
 *.sqlite
 *.sqlite3
 *.log
+
+# Generated reports and private user data
+backend/backend/generated_reports/
+backend/data/backups/
+backend/data/uploads/
+_f.py
+_f2.py
+backend/_q*.py
+.git_status_phase1_baseline.txt
+Asha Swar Nirantar/
+_f.py

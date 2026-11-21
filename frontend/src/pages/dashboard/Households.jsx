@@ -41,22 +41,27 @@ export default function Households() {
   const { t } = useI18n();
 
   const [search, setSearch] = useState("");
+  const [originFilter, setOriginFilter] = useState("all"); // all | registered | synthetic_demo
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
 
   const fetchList = useCallback(async (q) => {
     setLoading(true);
+    setLoadError("");
     try {
       const qs = q ? `?search=${encodeURIComponent(q)}` : "";
       const d = await api.get(`/households${qs}`);
       setItems(d.households || []);
     } catch (e) {
-      showToast(e.message || t("households.loadErr", "Could not load households."), "error");
+      const msg = e?.message || t("households.loadErr", "Could not load households.");
+      setLoadError(msg);
+      showToast(msg, "error");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const debounceRef = useRef(null);
   useEffect(() => {
@@ -65,13 +70,20 @@ export default function Households() {
     return () => clearTimeout(debounceRef.current);
   }, [search, fetchList]);
 
+  const filteredItems = React.useMemo(() => {
+    if (originFilter === "all") return items;
+    if (originFilter === "synthetic_demo") return items.filter((h) => h.data_origin === "synthetic_demo");
+    if (originFilter === "registered") return items.filter((h) => h.data_origin !== "synthetic_demo");
+    return items;
+  }, [items, originFilter]);
+
   return (
     <div className="space-y-5">
       {/* header + search */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-xl font-extrabold text-teal-deep">{t("households.title")}</h2>
-          <p className="mt-0.5 text-sm font-medium text-teal-deep/55">{t("households.subtitle")}</p>
+          <p className="mt-0.5 text-sm font-medium text-teal-deep/55">{t("households.subtitle")} Records are separated by origin; public research datasets are not converted into households.</p>
         </div>
         <div className="flex items-center gap-2.5">
           <button
@@ -105,6 +117,18 @@ export default function Households() {
         </div>
       </div>
 
+      <div className="card-ivory flex flex-wrap items-center gap-2 p-3">
+        <span className="text-xs font-extrabold uppercase tracking-wide text-teal-deep/50">Data origin filter:</span>
+        {[
+          { key: "all", label: "All local records" },
+          { key: "registered", label: "Registered data" },
+          { key: "synthetic_demo", label: "Synthetic demo data" },
+        ].map((o) => (
+          <button key={o.key} onClick={() => setOriginFilter(o.key)} className={["chip px-3 py-1.5 transition-all", originFilter === o.key ? "bg-[#7A1638] text-white" : "bg-teal-deep/5 text-teal-deep/60 hover:bg-mint-soft hover:text-teal-deep"].join(" ")}>{o.label}</button>
+        ))}
+        <span className="ml-auto text-[0.68rem] font-semibold text-teal-deep/45">Public research data is separate in Research &amp; Population Insights.</span>
+      </div>
+
       {/* list */}
       {loading ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -112,17 +136,23 @@ export default function Households() {
             <SkeletonCard key={i} />
           ))}
         </div>
-      ) : items.length === 0 ? (
+      ) : loadError ? (
+        <div className="card-ivory p-6 text-center">
+          <p className="text-sm font-extrabold text-teal-deep">{t("households.loadErr", "Could not load households.")}</p>
+          <p className="mt-1 text-xs text-teal-deep/60">{loadError}</p>
+          <button onClick={() => fetchList(search)} className="btn-mint mt-4 px-4 py-2 text-sm">{t("common.retry", "Retry")}</button>
+        </div>
+      ) : filteredItems.length === 0 ? (
         <div className="card-ivory">
           <Empty
             icon={HomeIcon}
             title={t("households.title")}
-            subtitle={t("empty.records")}
+            subtitle={search || originFilter !== "all" ? "No households match the current filters." : (items.length === 0 ? t("households.emptyNormalMode", "No households are visible in this mode. If demo data exists, enable explicit demo mode to view it.") : t("empty.records"))}
           />
         </div>
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {items.map((h, i) => (
+          {filteredItems.map((h, i) => (
             <motion.button
               key={h.id}
               initial={{ opacity: 0, y: 14 }}
@@ -145,6 +175,9 @@ export default function Households() {
                   <p className="mt-0.5 flex items-center gap-1.5 truncate text-xs font-semibold text-teal-deep/50">
                     <Users size={12} /> {t("households.members")}: {h.member_count} · {h.address || "—"}
                   </p>
+                  {(h.data_origin === "synthetic_demo") && (
+                    <span className="mt-1 inline-flex chip bg-amber-100 text-amber-900 border border-amber-200">SYNTHETIC DEMO DATA</span>
+                  )}
                 </div>
               </div>
               <div className="mt-4 flex flex-wrap items-center gap-2">

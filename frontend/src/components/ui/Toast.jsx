@@ -12,6 +12,7 @@ const listeners = new Set();
 let stack = [];
 let counter = 0;
 let hostMounted = false;
+const recentToasts = new Map(); // `${type}:${message}` -> timestamp
 
 function emit() {
   listeners.forEach((l) => l(stack));
@@ -24,6 +25,15 @@ export function dismissToast(id) {
 
 export function showToast(message, type = "info") {
   if (!message) return;
+  const key = `${type}:${message}`;
+  const now = Date.now();
+  const last = recentToasts.get(key) || 0;
+  if (now - last < 2000) return null;
+  recentToasts.set(key, now);
+  // Prune old entries occasionally
+  if (recentToasts.size > 50) {
+    for (const [k, ts] of recentToasts) if (now - ts > 5000) recentToasts.delete(k);
+  }
   const id = ++counter;
   stack = [...stack, { id, message, type }];
   ensureHost();

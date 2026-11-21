@@ -7,10 +7,15 @@
 """
 import json
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.websockets import WebSocketState
 
-from app.auth import get_current_worker
+from pydantic import BaseModel, Field
+
+from sqlalchemy.orm import Session
+
+from app.auth import create_ws_token, get_current_worker, verify_ws_token
+from app.database import get_db
 from app.schemas import ExtractMultiResponse, ExtractRequest, ExtractResponse, TtsRequest, TtsResponse
 from app.services import gnani
 
@@ -33,7 +38,7 @@ def extract(payload: ExtractRequest, _worker=Depends(get_current_worker)):
     structured, mode = gnani.extract_fields(payload.transcript, payload.language)
     return {
         "structured": structured,
-        "danger_flags": detect_danger_signs(payload.transcript),
+        "danger_flags": detect_danger_signs(payload.transcript, structured=structured),
         "mode": mode,
     }
 
@@ -49,7 +54,7 @@ def extract_multi(payload: ExtractRequest, _worker=Depends(get_current_worker)):
     from app.rules import detect_danger_signs
 
     result, mode = gnani.extract_fields_multi(payload.transcript, payload.language)
-    result["danger_flags"] = detect_danger_signs(payload.transcript)
+    result["danger_flags"] = detect_danger_signs(payload.transcript, structured=result)
     result["mode"] = mode
     return result
 
@@ -60,8 +65,48 @@ def tts(payload: TtsRequest, _worker=Depends(get_current_worker)):
     return gnani.text_to_speech(payload.text, payload.language)
 
 
+class TaraChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    language: str = "en"
+    context: dict | None = None
+
+
+@router.post("/voice/chat")
+def tara_chat(payload: TaraChatRequest, _worker=Depends(get_current_worker)):
+    """Conversational assistance for Tara (Gemini-powered). Returns honest errors on failure."""
+    try:
+        reply = gnani.generate_tara_response(
+            payload.message,
+            language=payload.language or "en",
+            context=payload.context or {},
+        )
+        return {"reply": reply, "provider": "Google Gemini", "mode": "live"}
+    except gnani.GeminiLLMError as exc:
+        status = 503
+        if exc.code in ("invalid_request",):
+            status = 400
+        elif exc.code in ("invalid_api_key", "missing_api_key", "missing_model", "unsupported_model"):
+            status = 503
+        elif exc.code in ("quota_exhausted", "rate_limited"):
+            status = 429
+        elif exc.code in ("timeout", "network_error", "provider_error", "empty_response", "malformed_response"):
+            status = 502
+        raise HTTPException(status_code=status, detail={"message": exc.message, "code": exc.code, "provider": "Google Gemini"})
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail={"message": "Gemini request failed.", "code": "provider_error", "provider": "Google Gemini"},
+        )
+
+
+@router.post("/voice/ws-token")
+def voice_ws_token(_worker=Depends(get_current_worker)):
+    """Issue a short-lived token for the authenticated voice WebSocket."""
+    return {"token": create_ws_token(_worker.id, ttl_seconds=300), "expires_in_seconds": 300}
+
+
 @router.websocket("/ws/voice")
-async def ws_voice(ws: WebSocket, language: str = "en"):
+async def ws_voice(ws: WebSocket, language: str = "en", token: str = ""):
     """Streaming voice WebSocket.
 
     Protocol (per spec):
@@ -74,6 +119,32 @@ async def ws_voice(ws: WebSocket, language: str = "en"):
     Speech is either supplied by the configured Gnani provider or by the
     browser's speech-recognition API. The server never fabricates transcripts.
     """
+    worker_id = verify_ws_token(token)
+    if not worker_id:
+        await ws.accept()
+        await _ws_send(ws, {"type": "error", "code": "ws_auth", "message": "Voice session authentication required."})
+        await ws.close(code=4401)
+        return
+    # Best-effort worker active check; do not log token.
+    try:
+        from app.database import SessionLocal
+        from app.models import AshaWorker
+        db = SessionLocal()
+        try:
+            worker = db.query(AshaWorker).filter(AshaWorker.id == worker_id, AshaWorker.is_active == True).first()  # noqa: E712
+            if worker is None:
+                await ws.accept()
+                await _ws_send(ws, {"type": "error", "code": "ws_auth", "message": "Voice session authentication required."})
+                await ws.close(code=4401)
+                return
+        finally:
+            db.close()
+    except Exception:
+        await ws.accept()
+        await _ws_send(ws, {"type": "error", "code": "ws_auth", "message": "Voice session authentication failed."})
+        await ws.close(code=4401)
+        return
+
     await ws.accept()
     if not gnani.prisma_language_enabled(language):
         reason = "integration_not_configured" if not gnani._live_enabled() else "language_not_verified"
@@ -94,11 +165,7 @@ async def ws_voice(ws: WebSocket, language: str = "en"):
     import websockets
 
     url = gnani.prisma_connection_url(language)
-    headers = {
-        "Authorization": f"Bearer {gnani.get_env('GNANI_API_KEY')}",
-        "apikey": gnani.get_env("GNANI_API_KEY"),
-        "apisecret": gnani.get_env("GNANI_API_SECRET"),
-    }
+    headers = gnani.prisma_connection_headers(language)
     upstream = None
     try:
         upstream = await websockets.connect(url, extra_headers=headers)  # type: ignore[call-arg]
@@ -118,6 +185,7 @@ async def ws_voice(ws: WebSocket, language: str = "en"):
                 "mode": "demo",
                 "provider": "browser",
                 "reason": reason,
+                "detail": {"status_code": status_code, "error": str(exc)},
             },
         )
         await ws.close()
@@ -209,3 +277,12 @@ async def _finalize_upstream(ws: WebSocket, upstream, mode: str, timeout: float 
 async def _ws_send(ws: WebSocket, payload: dict) -> None:
     if ws.client_state == WebSocketState.CONNECTED:
         await ws.send_json(payload)
+
+
+@router.get("/voice/beneficiary-history/{beneficiary_id}")
+def beneficiary_history(beneficiary_id: int, question: str = "", db: Session = Depends(get_db), _worker=Depends(get_current_worker)):
+    """DB-grounded beneficiary history retrieval. Never fabricates missing data."""
+    from app.services.history_retrieval import answer_history_question, beneficiary_history_summary
+    if question.strip():
+        return answer_history_question(db, beneficiary_id, question)
+    return beneficiary_history_summary(db, beneficiary_id)

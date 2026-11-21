@@ -1,8 +1,8 @@
-"""Synthetic demo data seeder.
+"""Opt-in demo data seeder.
 
-Runs automatically on startup when the database is empty. All dates are
-computed relative to date.today() so the demo data always looks current
-(some visits today, some overdue — so the Pulse Drift board has data).
+Called only when demo setup is explicitly enabled and the database is empty.
+All dates are computed relative to date.today() so demo records stay current
+for development and demonstration.
 
 DEMO LOGIN (clearly labelled, printed in the startup log):
     Worker ID: ASHA001
@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import hash_password
 from app.models import (
+    AshaWorker,
     Beneficiary,
     DangerAlert,
     FollowUp,
@@ -53,12 +54,43 @@ def _qr_id() -> str:
     return f"ASN-{part()}-{part()}"
 
 
+def ensure_demo_worker(db: Session) -> AshaWorker:
+    """Create the demo worker if missing; keep the demo account usable for admin-only demo areas."""
+    worker = db.query(AshaWorker).filter(AshaWorker.worker_id == DEMO_WORKER_ID).first()
+    if worker is not None:
+        changed = False
+        if getattr(worker, "role", "asha") != "admin":
+            worker.role = "admin"
+            changed = True
+        if not getattr(worker, "is_active", True):
+            worker.is_active = True
+            changed = True
+        if changed:
+            db.commit()
+            db.refresh(worker)
+        return worker
+
+    worker = AshaWorker(
+        worker_id=DEMO_WORKER_ID,
+        name="Meena Kulkarni",
+        password_hash=hash_password(DEMO_PASSWORD),
+        language="en",
+        phc="PHC Rampur",
+        role="admin",
+        is_active=True,
+    )
+    db.add(worker)
+    db.commit()
+    db.refresh(worker)
+    return worker
+
+
 def is_db_empty(db: Session) -> bool:
     return db.query(Beneficiary).count() == 0
 
 
 def seed(db: Session) -> None:
-    """Populate an empty database with labelled synthetic demo data."""
+    """Populate an empty database with labelled demo data."""
     if not is_db_empty(db):
         return
 
@@ -67,49 +99,51 @@ def seed(db: Session) -> None:
         name="Meena Kulkarni",
         language="en",
         phc="PHC Rampur",
+        role="admin",
+        is_active=True,
     )
-    from app.models import AshaWorker
-
     worker = db.query(AshaWorker).filter(AshaWorker.worker_id == DEMO_WORKER_ID).first()
     if worker is None:
         worker = AshaWorker(password_hash=hash_password(DEMO_PASSWORD), **worker_kwargs)
         db.add(worker)
         db.flush()
+    elif getattr(worker, "role", "asha") != "admin":
+        worker.role = "admin"
 
     # ------------------------------------------------------------------
     # Beneficiaries
     # ------------------------------------------------------------------
     lakshmi = Beneficiary(qr_id=_qr_id(), name="Lakshmi Devi", age=24, category="pregnancy",
                           village="Rampur", phone="9876500001",
-                          lmp_date=_days(-28 * 7))
+                          lmp_date=_days(-28 * 7), data_origin="demo")
     ananya = Beneficiary(qr_id=_qr_id(), name="Ananya", age=0, category="newborn",
                          village="Rampur", phone="9876500002",
-                         birth_date=_days(-12))
+                         birth_date=_days(-12), data_origin="demo")
     rohit = Beneficiary(qr_id=_qr_id(), name="Rohit Kumar", age=2, category="child",
-                        village="Kishanganj", phone="9876500003")
+                        village="Kishanganj", phone="9876500003", data_origin="demo")
     priya = Beneficiary(qr_id=_qr_id(), name="Priya Sharma", age=26, category="pregnancy",
                         village="Rampur", phone="9876500004",
-                        lmp_date=_days(-32 * 7))
+                        lmp_date=_days(-32 * 7), data_origin="demo")
     sunita = Beneficiary(qr_id=_qr_id(), name="Sunita Bai", age=30, category="pregnancy",
                          village="Devgarh", phone="9876500005",
-                         lmp_date=_days(-36 * 7))
+                         lmp_date=_days(-36 * 7), data_origin="demo")
     aarav = Beneficiary(qr_id=_qr_id(), name="Aarav", age=0, category="newborn",
                         village="Devgarh", phone="9876500006",
-                        birth_date=_days(-10))
+                        birth_date=_days(-10), data_origin="demo")
     chetan = Beneficiary(qr_id=_qr_id(), name="Chetan Singh", age=1, category="child",
                          village="Kishanganj", phone="9876500007",
-                         birth_date=_days(-365))
+                         birth_date=_days(-365), data_origin="demo")
     kavita = Beneficiary(qr_id=_qr_id(), name="Kavita Devi", age=22, category="pregnancy",
                          village="Rampur", phone="9876500008",
-                         lmp_date=_days(-12 * 7))
+                         lmp_date=_days(-12 * 7), data_origin="demo")
     ishaan = Beneficiary(qr_id=_qr_id(), name="Ishaan", age=0, category="newborn",
                          village="Rampur", phone="9876500009",
-                         birth_date=_days(-40))
+                         birth_date=_days(-40), data_origin="demo")
     ira = Beneficiary(qr_id=_qr_id(), name="Ira Mishra", age=1, category="immunisation",
                       village="Kishanganj", phone="9876500010",
-                      birth_date=_days(-250))
+                      birth_date=_days(-250), data_origin="demo")
     kamala = Beneficiary(qr_id=_qr_id(), name="Kamala Devi", age=68, category="elderly",
-                         village="Devgarh", phone="9876500011")
+                         village="Devgarh", phone="9876500011", data_origin="demo")
     db.add_all([lakshmi, ananya, rohit, priya, sunita, aarav, chetan, kavita, ishaan, ira, kamala])
     db.flush()
 
@@ -161,7 +195,7 @@ def seed(db: Session) -> None:
     def add_reminder(b: Beneficiary, type_: str, due: date, status: str,
                      message: str, fu: FollowUp | None = None) -> SmsReminder:
         # `status` is the schedule state; `sms_status` is the delivery state.
-        # Seeded history is synthetic — no real SMS was ever sent, so it is
+        # Seeded history is demo data — no real SMS was ever sent, so it is
         # labelled "demo_sent" rather than claiming a real delivery.
         if status == "sent":
             sms_status = "demo_sent"
@@ -348,9 +382,9 @@ def seed(db: Session) -> None:
     # ------------------------------------------------------------------
     # HOUSEHOLDS — Household Health & Hygiene
     # ------------------------------------------------------------------
-    hh1 = Household(qr_id="HN-4KDP-7RWM", village="Rampur", address="House 24, Ward 3, Near Anganwadi", member_count=5)
-    hh2 = Household(qr_id="HN-9MWK-2QXF", village="Kishanganj", address="House 11, Ward 1", member_count=4)
-    hh3 = Household(qr_id="HN-7TSP-5CJB", village="Devgarh", address="House 7, Hill Road", member_count=6)
+    hh1 = Household(qr_id="HN-4KDP-7RWM", village="Rampur", address="House 24, Ward 3, Near Anganwadi", member_count=5, data_origin="demo")
+    hh2 = Household(qr_id="HN-9MWK-2QXF", village="Kishanganj", address="House 11, Ward 1", member_count=4, data_origin="demo")
+    hh3 = Household(qr_id="HN-7TSP-5CJB", village="Devgarh", address="House 7, Hill Road", member_count=6, data_origin="demo")
     db.add_all([hh1, hh2, hh3])
     db.flush()
 
@@ -423,13 +457,52 @@ def seed(db: Session) -> None:
     db.commit()
 
     # ------------------------------------------------------------------
-    # Extended synthetic dataset: 50 households, 150 beneficiaries
+    # Extended demo dataset: 50 households, 150 beneficiaries
     # ------------------------------------------------------------------
     seed_extended(db, worker)
 
+    # Demo contact addresses so the SMS / email notification workflows
+    # have something to work with. Real deployments leave this empty.
+    backfill_emails(db)
+
 
 # ---------------------------------------------------------------------------
-# Extended seed — 50 households, 150 beneficiaries (SYNTHETIC_DEMO)
+# Demo email addresses
+#
+# The demo dataset is for demonstration, so addresses use the reserved
+# "example.invalid" domain (RFC 2606) and can never reach a real mailbox.
+# ---------------------------------------------------------------------------
+
+def _demo_email(b: Beneficiary) -> str:
+    """A deterministic, non-deliverable address for a demo beneficiary."""
+    import re
+    import unicodedata
+
+    base = unicodedata.normalize("NFKD", b.name or "").encode("ascii", "ignore").decode()
+    base = re.sub(r"[^a-zA-Z0-9]+", ".", base).strip(".").lower()
+    if not base:
+        base = "beneficiary"
+    return f"{base}.{b.id}@example.invalid"
+
+
+def backfill_emails(db: Session) -> int:
+    """Give every beneficiary without an address a demo one.
+
+    Idempotent — beneficiaries that already have an address keep it.
+    """
+    updated = 0
+    for b in db.query(Beneficiary).all():
+        if b.email:
+            continue
+        b.email = _demo_email(b)
+        updated += 1
+    if updated:
+        db.commit()
+    return updated
+
+
+# ---------------------------------------------------------------------------
+# Extended seed — 50 households, 150 beneficiaries (demo data)
 # ---------------------------------------------------------------------------
 
 def _hh_qr_id() -> str:
@@ -440,7 +513,7 @@ def _hh_qr_id() -> str:
 
 
 def seed_extended(db: Session, worker) -> None:  # noqa: C901
-    """Add 50 households and 150 beneficiaries marked SYNTHETIC_DEMO."""
+    """Add 50 households and 150 beneficiaries marked as demo data."""
     import random
 
     rng = random.Random(42)  # deterministic so reruns are identical
@@ -518,13 +591,13 @@ def seed_extended(db: Session, worker) -> None:  # noqa: C901
         db.add(PregnancyRecord(
             beneficiary_id=b.id, visit_id=visit.id,
             weeks_pregnant=kw.pop("weeks_pregnant", None),
-            notes="SYNTHETIC_DEMO",
+            notes="Demo record",
             **kw,
         ))
 
     def _add_newborn_rec(visit: "VisitRecord", b: "Beneficiary", **kw) -> None:
         db.add(NewbornRecord(
-            beneficiary_id=b.id, visit_id=visit.id, notes="SYNTHETIC_DEMO",
+            beneficiary_id=b.id, visit_id=visit.id, notes="Demo record",
             **kw,
         ))
 
@@ -557,8 +630,9 @@ def seed_extended(db: Session, worker) -> None:  # noqa: C901
         age = rng.randint(19, 35)
         b = Beneficiary(
             qr_id=_unique_qr(), name=_female_name(), age=age,
-            category="pregnancy", village=f"{village} [SYNTHETIC_DEMO]",
+            category="pregnancy", village=village,
             phone=_phone(), lmp_date=lmp,
+            data_origin="demo",
         )
         db.add(b)
         db.flush()
@@ -591,8 +665,9 @@ def seed_extended(db: Session, worker) -> None:  # noqa: C901
                                                    "Preethi", "Akhil", "Nisha", "Rohan",
                                                    "Divya", "Arun", "Bhavna", "Charu"]),
             age=0, category="newborn",
-            village=f"{village} [SYNTHETIC_DEMO]",
+            village=village,
             phone=_phone(), birth_date=birth_date,
+            data_origin="demo",
         )
         db.add(b)
         db.flush()
@@ -633,8 +708,9 @@ def seed_extended(db: Session, worker) -> None:  # noqa: C901
                 "Kiran", "Lata", "Mohan", "Nita", "Om",
             ]),
             age=age_years, category=category,
-            village=f"{village} [SYNTHETIC_DEMO]",
+            village=village,
             phone=_phone(), birth_date=birth_date,
+            data_origin="demo",
         )
         db.add(b)
         db.flush()
@@ -671,8 +747,9 @@ def seed_extended(db: Session, worker) -> None:  # noqa: C901
         b = Beneficiary(
             qr_id=_unique_qr(), name=name, age=age,
             category="elderly",
-            village=f"{village} [SYNTHETIC_DEMO]",
+            village=village,
             phone=_phone(),
+            data_origin="demo",
         )
         db.add(b)
         db.flush()
@@ -697,8 +774,9 @@ def seed_extended(db: Session, worker) -> None:  # noqa: C901
         b = Beneficiary(
             qr_id=_unique_qr(), name=name, age=age,
             category="adolescent",
-            village=f"{village} [SYNTHETIC_DEMO]",
+            village=village,
             phone=_phone(),
+            data_origin="demo",
         )
         db.add(b)
         db.flush()
@@ -716,8 +794,9 @@ def seed_extended(db: Session, worker) -> None:  # noqa: C901
         b = Beneficiary(
             qr_id=_unique_qr(), name=_female_name(), age=age,
             category="nutrition",
-            village=f"{village} [SYNTHETIC_DEMO]",
+            village=village,
             phone=_phone(),
+            data_origin="demo",
         )
         db.add(b)
         db.flush()
@@ -759,9 +838,10 @@ def seed_extended(db: Session, worker) -> None:  # noqa: C901
 
         hh = Household(
             qr_id=_unique_hh_qr(),
-            village=f"{village} [SYNTHETIC_DEMO]",
+            village=village,
             address=address,
             member_count=member_count,
+            data_origin="demo",
         )
         db.add(hh)
         db.flush()
@@ -826,5 +906,5 @@ def seed_extended(db: Session, worker) -> None:  # noqa: C901
     db.commit()
     print(
         f"[seed_extended] Seeded {len(all_bens)} beneficiaries "
-        f"across {len(households)} households (SYNTHETIC_DEMO)."
+        f"across {len(households)} households (demo data)."
     )
