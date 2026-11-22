@@ -10,12 +10,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_worker
+from app.data_scope import visible_beneficiaries
 from app.database import get_db
 from app.models import (
     AshaWorker,
     Beneficiary,
     DangerAlert,
     ExtractedField,
+    FieldAudit,
     FollowUp,
     Household,
     HouseholdMember,
@@ -55,17 +57,82 @@ def _parse_date(value) -> date:
         return date.today()
 
 
-def _alert_dict(alert: DangerAlert, beneficiary_name: str) -> dict:
+def _alert_dict(alert: DangerAlert, beneficiary_name: str, beneficiary=None, household_map: dict | None = None) -> dict:
+    status = alert.status or "open"
+    if status == "open":
+        status = "new"
+    status = (status or "new").lower().replace("-", "_")
+    category = alert.alert_category or "danger_sign"
+    detected_sign = (getattr(alert, "triggered_phrase", "") or "").strip()
+    visit_id = getattr(alert, "visit_id", None)
+    reason = alert.reason or (f'Detected approved danger phrase "{detected_sign}" (rule {alert.rule_id}).' if detected_sign else "Detected approved danger sign from recorded observation.")
+    recommended = alert.recommended_action or alert.message or "Refer to PHC as per approved guidelines."
+    household_id = None
+    household_name = ""
+    if beneficiary is not None and getattr(beneficiary, "household_id", None):
+        household_id = beneficiary.household_id
+        hh = (household_map or {}).get(household_id)
+        if hh is not None:
+            village = getattr(hh, "village", "") or ""
+            qr = getattr(hh, "qr_id", "") or ""
+            household_name = f"{village} household ({qr})".strip() if (village or qr) else f"Household {household_id}"
+        else:
+            household_name = f"Household {household_id}"
+    elif visit_id and beneficiary is not None:
+        # fallback if household not joined but beneficiary has no household link
+        household_id = getattr(beneficiary, "household_id", None)
+
+    clinical_source = getattr(alert, "clinical_source", "") or "ASHA Swar Nirantar deterministic danger-sign phrase rules (backend/app/rules.py). Clinical review/approval pending."
+    rule_version = getattr(alert, "rule_version", "") or "draft-unreviewed-v1"
+    ben_origin = (getattr(beneficiary, "data_origin", None) or "registered") if beneficiary is not None else "registered"
+    is_synthetic = ben_origin == "synthetic_demo" or (getattr(beneficiary, "verification_status", "") == "synthetic_demo" if beneficiary is not None else False)
+    trigger_detail = alert.trigger_detail or (f'Verified phrase "{detected_sign}" detected in recorded visit observation.' if detected_sign else "")
+    if visit_id:
+        source_observation = f"Visit record #{visit_id}" + (f": {trigger_detail}" if trigger_detail else "")
+    else:
+        source_observation = trigger_detail or (f'Recorded observation: "{detected_sign}"' if detected_sign else "Recorded observation (visit not linked)")
+    detection_ts = alert.created_at or datetime.utcnow()
+
     return {
         "id": alert.id,
         "beneficiary_id": alert.beneficiary_id,
         "beneficiary_name": beneficiary_name,
-        "phrase": alert.triggered_phrase,
+        "beneficiary_data_origin": ben_origin,
+        "is_synthetic_demo": bool(is_synthetic),
+        "household_id": household_id,
+        "household_name": household_name,
+        "visit_id": visit_id,
+        "phrase": detected_sign,
+        "triggering_phrase": detected_sign,
+        "detected_danger_sign": detected_sign,
         "rule_id": alert.rule_id,
+        "rule_version": rule_version,
+        "clinical_source": clinical_source,
         "message": alert.message,
         "severity": alert.severity,
-        "status": alert.status,
-        "created_at": alert.created_at or datetime.utcnow(),
+        "status": status,
+        "alert_category": category,
+        "trigger_detail": trigger_detail,
+        "trigger_value": alert.trigger_value or detected_sign,
+        "triggering_event": trigger_detail or detected_sign,
+        "source_observation": source_observation,
+        "reason": reason,
+        "recommended_action": recommended,
+        "assigned_worker_id": alert.assigned_worker_id,
+        "escalation_note": alert.escalation_note or "",
+        "resolved_note": alert.resolved_note or "",
+        "referral_facility": getattr(alert, "referral_facility", "") or "",
+        "referral_date": getattr(alert, "referral_date", None),
+        "referral_note": getattr(alert, "referral_note", "") or "",
+        "referred_at": getattr(alert, "referred_at", None),
+        "referred_by_worker_id": getattr(alert, "referred_by_worker_id", None),
+        "referral_pending": bool((getattr(alert, "referral_facility", "") or getattr(alert, "referred_at", None)) and status not in ("resolved","dismissed")),
+        "dismiss_reason": (alert.resolved_note or "") if status == "dismissed" else "",
+        "detection_timestamp": detection_ts,
+        "updated_at": alert.updated_at,
+        "resolved_at": alert.resolved_at,
+        "created_at": detection_ts,
+        "generated_at": detection_ts,
     }
 
 
@@ -83,15 +150,22 @@ def _process_single_visit(
     gender: Optional[str] = None,
     village: Optional[str] = None,
     household_id: Optional[int] = None,
+    idempotency_key: str = "",
 ) -> tuple[VisitRecord, Beneficiary, list[dict[str, Any]], Optional[dict[str, Any]]]:
     """Core logic to process and persist one visit record."""
     beneficiary = None
     if beneficiary_id:
-        beneficiary = db.query(Beneficiary).filter(Beneficiary.id == beneficiary_id).first()
+        beneficiary = (
+            visible_beneficiaries(db.query(Beneficiary))
+            .filter(Beneficiary.id == beneficiary_id)
+            .first()
+        )
+        if beneficiary is None:
+            raise HTTPException(status_code=404, detail="Beneficiary not found")
 
     if beneficiary is None and beneficiary_name:
         spoken_name = beneficiary_name.strip().lower()
-        all_bens = db.query(Beneficiary).all()
+        all_bens = visible_beneficiaries(db.query(Beneficiary)).all()
         beneficiary = (
             next((b for b in all_bens if b.name.strip().lower() == spoken_name), None)
             or next((b for b in all_bens if b.name.strip().lower().split()[0] == spoken_name), None)
@@ -142,6 +216,7 @@ def _process_single_visit(
         category=cat,
         notes=json.dumps(structured),
         source=source,
+        idempotency_key=(idempotency_key or "")[:128],
     )
     db.add(visit)
     db.flush()
@@ -195,35 +270,64 @@ def _process_single_visit(
     if (transcript or "").strip():
         db.add(VoiceTranscript(visit_id=visit.id, transcript=transcript, language=language))
 
-    # Danger signs
+    # Danger signs (evaluate verified transcript and structured observations)
     alerts_out: list[dict[str, Any]] = []
-    if (transcript or "").strip():
-        flags = detect_danger_signs(transcript, beneficiary.category)
-        for flag in flags:
-            existing = (
-                db.query(DangerAlert)
-                .filter(DangerAlert.beneficiary_id == beneficiary.id,
-                        DangerAlert.rule_id == flag["rule_id"],
-                        DangerAlert.status == "open")
-                .first()
-            )
-            if existing:
-                alert = existing
-            else:
-                alert = DangerAlert(
-                    beneficiary_id=beneficiary.id,
-                    visit_id=visit.id,
-                    triggered_phrase=flag["phrase"],
-                    rule_id=flag["rule_id"],
-                    message=REFERRAL_MESSAGE,
-                    severity=flag["severity"],
-                    status="open",
-                )
-                db.add(alert)
-                db.flush()
-            alerts_out.append(_alert_dict(alert, beneficiary.name))
+    alert_generation_error: str | None = None
+    combined_text = (transcript or "").strip()
+    has_structured_obs = any(isinstance(v, (str, list, dict)) and v for k, v in (structured or {}).items() if any(tok in str(k).lower() for tok in ("danger", "symptom", "complaint", "note", "observation", "finding", "concern", "problem", "remark")))
+    if combined_text or has_structured_obs:
+        try:
+            with db.begin_nested():
+                flags = detect_danger_signs(transcript, beneficiary.category, structured=structured)
+                for flag in flags:
+                    existing = (
+                        db.query(DangerAlert)
+                        .filter(
+                            DangerAlert.beneficiary_id == beneficiary.id,
+                            DangerAlert.rule_id == flag["rule_id"],
+                            DangerAlert.status.notin_(["resolved", "dismissed"]),
+                        )
+                        .first()
+                    )
+                    if existing:
+                        alert = existing
+                    else:
+                        alert = DangerAlert(
+                            beneficiary_id=beneficiary.id,
+                            visit_id=visit.id,
+                            triggered_phrase=flag["phrase"],
+                            rule_id=flag["rule_id"],
+                            rule_version="deterministic-v2",
+                            clinical_source=flag.get("guideline_citation") or "ASHA Swar Nirantar deterministic danger-sign phrase rules (backend/app/rules.py). Clinical review/approval pending.",
+                            message=flag.get("message") or REFERRAL_MESSAGE,
+                            severity=flag.get("severity", "high"),
+                            status="new",
+                            alert_category=flag.get("applies_to") or "danger_sign",
+                            trigger_detail=f'Verified phrase "{flag["phrase"]}" matched rule {flag["rule_id"]}.',
+                            trigger_value=flag["phrase"],
+                            reason=f'Danger sign detected from recorded observation/transcript: "{flag["phrase"]}" matched approved rule {flag["rule_id"]}.',
+                            recommended_action=flag.get("message") or REFERRAL_MESSAGE,
+                            assigned_worker_id=beneficiary.assigned_worker_id,
+                            updated_at=datetime.utcnow(),
+                        )
+                        db.add(alert)
+                        db.flush()
+                        try:
+                            from app.models import AlertAuditLog
+                            db.add(AlertAuditLog(alert_id=alert.id, action="created", actor_label="system", note=f"Rule {flag['rule_id']} triggered from visit record."))
+                        except Exception:
+                            pass
+                    alerts_out.append(_alert_dict(alert, beneficiary.name, beneficiary))
+        except Exception as e:
+            # Preserve the saved visit; surface alert-processing failure for safe retry/investigation.
+            alert_generation_error = str(e.__class__.__name__)
+            try:
+                from app import logger as _logger
+                _logger.warning("Danger alert generation failed for visit %s: %s", getattr(visit, "id", None), e.__class__.__name__)
+            except Exception:
+                pass
 
-    # Auto-schedule follow up
+    # Auto-schedule follow up (persisted task, idempotent)
     follow_up_out = None
     next_due: Optional[date] = None
     fu_type = cat
@@ -253,26 +357,112 @@ def _process_single_visit(
         fu_type = "vaccination"
 
     if next_due:
+        from app.models import FollowUpHistory
+        from app.services.followups import status_for_due
+
+        reason_map = {
+            "anc": "ANC follow-up visit",
+            "newborn": "Newborn follow-up visit",
+            "vaccination": "Vaccination follow-up",
+            "nutrition": "Nutrition follow-up",
+            "community": "Community health follow-up",
+        }
+        reason = reason_map.get(fu_type, f"{fu_type} follow-up")
         existing_fu = (
             db.query(FollowUp)
-            .filter(FollowUp.beneficiary_id == beneficiary.id, FollowUp.due_date == next_due,
-                    FollowUp.status == "upcoming", FollowUp.type == fu_type)
+            .filter(
+                FollowUp.beneficiary_id == beneficiary.id,
+                FollowUp.due_date == next_due,
+                FollowUp.type == fu_type,
+                FollowUp.status.in_(["upcoming", "due", "overdue"]),
+            )
+            .order_by(FollowUp.id.desc())
             .first()
         )
-        fu = existing_fu or FollowUp(beneficiary_id=beneficiary.id, visit_id=visit.id,
-                                     type=fu_type, due_date=next_due, status="upcoming")
-        if fu not in db:
+        if existing_fu:
+            # Do not silently overwrite existing active follow-up details; keep schedule link fresh.
+            if not existing_fu.visit_id:
+                existing_fu.visit_id = visit.id
+            if not getattr(existing_fu, "source_type", ""):
+                existing_fu.source_type = "visit"
+                existing_fu.source_id = visit.id
+                existing_fu.source_ref = f"visit:{visit.id}"
+            existing_fu.updated_at = datetime.utcnow()
+            fu = existing_fu
+        else:
+            fu = FollowUp(
+                beneficiary_id=beneficiary.id,
+                visit_id=visit.id,
+                type=fu_type,
+                category=fu_type,
+                due_date=next_due,
+                status=status_for_due(next_due),
+                priority="normal",
+                reason=reason,
+                description=f"Auto-scheduled from recorded visit on {visit_date.isoformat()}.",
+                recommended_action="Conduct the scheduled follow-up visit and record observations.",
+                assigned_worker_id=getattr(beneficiary, "assigned_worker_id", None) or worker.id,
+                source_type="visit",
+                source_id=visit.id,
+                source_ref=f"visit:{visit.id}",
+                dedup_key=f"visit:{visit.id}:{fu_type}:{next_due.isoformat()}",
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
             db.add(fu)
-        db.flush()
+            db.flush()
+            db.add(
+                FollowUpHistory(
+                    followup_id=fu.id,
+                    action="created",
+                    from_status="",
+                    to_status=fu.status,
+                    note=f"Auto-generated from confirmed visit #{visit.id}.",
+                    actor_id=worker.id,
+                    actor_label=worker.name or "worker",
+                    changed_at=datetime.utcnow(),
+                )
+            )
         follow_up_out = {"id": fu.id, "type": fu.type, "due_date": fu.due_date, "status": fu.status}
 
-    return visit, beneficiary, alerts_out, follow_up_out
+    return visit, beneficiary, alerts_out, follow_up_out, alert_generation_error
 
 
 @router.post("", response_model=VisitCreateResponse)
 def create_visit(payload: VisitCreate, db: Session = Depends(get_db),
                  worker: AshaWorker = Depends(get_current_worker)):
-    visit, beneficiary, alerts_out, follow_up_out = _process_single_visit(
+    confirmation = getattr(payload, "confirmation", None)
+    if confirmation is None or not getattr(confirmation, "confirmed", False):
+        raise HTTPException(status_code=400, detail="Explicit confirmation is required before saving a visit.")
+    if getattr(confirmation, "method", "voice") not in {"voice", "ui_fallback"}:
+        raise HTTPException(status_code=400, detail="Invalid confirmation method.")
+    idem = (getattr(payload, "idempotency_key", None) or "").strip()
+    if idem:
+        existing = (
+            db.query(VisitRecord)
+            .filter(
+                VisitRecord.worker_id == worker.id,
+                VisitRecord.beneficiary_id == payload.beneficiary_id,
+                VisitRecord.idempotency_key == idem,
+            )
+            .order_by(VisitRecord.id.desc())
+            .first()
+        )
+        if existing:
+            return {
+                "visit": {
+                    "id": existing.id,
+                    "beneficiary_id": existing.beneficiary_id,
+                    "visit_date": existing.visit_date,
+                    "category": existing.category,
+                    "source": existing.source,
+                    "structured": payload.structured or {},
+                },
+                "alerts": [],
+                "follow_up": None,
+                "idempotent_replay": True,
+            }
+    visit, beneficiary, alerts_out, follow_up_out, alert_generation_error = _process_single_visit(
         db=db,
         worker=worker,
         beneficiary_id=payload.beneficiary_id,
@@ -282,7 +472,24 @@ def create_visit(payload: VisitCreate, db: Session = Depends(get_db),
         language=payload.language,
         visit_type=payload.visit_type,
         create_if_missing=False,
+        idempotency_key=(getattr(payload, "idempotency_key", None) or ""),
     )
+    for corr in (getattr(payload, "corrections", None) or []):
+        if not isinstance(corr, dict):
+            continue
+        field = str(corr.get("field") or corr.get("field_name") or "").strip()
+        if not field:
+            continue
+        db.add(FieldAudit(
+            entity_type="visit_field",
+            entity_id=visit.id,
+            field_name=field[:64],
+            old_value=str(corr.get("old_value", ""))[:500],
+            new_value=str(corr.get("new_value", corr.get("value", "")))[:500],
+            changed_by=worker.id,
+            reason=str(corr.get("reason", "voice_correction"))[:256],
+            source=str(corr.get("source", "voice"))[:32],
+        ))
     db.commit()
     db.refresh(visit)
 
@@ -307,6 +514,7 @@ def create_visit(payload: VisitCreate, db: Session = Depends(get_db),
         },
         "alerts": alerts_out,
         "follow_up": follow_up_out,
+        "alert_generation_error": alert_generation_error,
     }
 
 
@@ -324,7 +532,7 @@ def create_batch_visits(
     try:
         # Process individual visits
         for item in payload.visits:
-            visit, ben, alerts, fu = _process_single_visit(
+            visit, ben, alerts, fu, alert_err = _process_single_visit(
                 db=db,
                 worker=worker,
                 beneficiary_id=item.beneficiary_id,

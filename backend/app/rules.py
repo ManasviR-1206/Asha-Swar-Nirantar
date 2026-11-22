@@ -70,25 +70,102 @@ NEWBORN_DANGER_PHRASES: list[tuple[str, str, str]] = [
     ("NEWB-11", "persistent crying", "medium"),
 ]
 
-REFERRAL_MESSAGE = "Refer to PHC as per approved guidelines."
+REFERRAL_MESSAGE = "Refer to the nearest PHC per approved guidelines."
+
+# Rule metadata for evidence/audit. Citations are public guideline references;
+# clinical deployment should confirm the exact local/provincial approved wording.
+RULE_METADATA: dict[str, dict[str, str]] = {
+    "PREG-01": {"applies_to": "mother", "guideline": "MoHFW/WHO ANC danger signs; refer for obstetric emergency evaluation", "referral": REFERRAL_MESSAGE},
+    "PREG-02": {"applies_to": "mother", "guideline": "MoHFW/WHO ANC danger signs; severe headache may indicate hypertensive disorder", "referral": REFERRAL_MESSAGE},
+    "PREG-03": {"applies_to": "mother", "guideline": "MoHFW/WHO ANC danger signs; blurred vision may indicate hypertensive disorder", "referral": REFERRAL_MESSAGE},
+    "PREG-04": {"applies_to": "mother", "guideline": "MoHFW/WHO ANC danger signs; convulsions/fits are emergency danger signs", "referral": REFERRAL_MESSAGE},
+    "PREG-05": {"applies_to": "mother", "guideline": "MoHFW/WHO ANC danger signs; swelling of hands/face may indicate hypertensive disorder", "referral": REFERRAL_MESSAGE},
+    "PREG-06": {"applies_to": "mother", "guideline": "MoHFW/WHO ANC danger signs; difficulty breathing is an emergency danger sign", "referral": REFERRAL_MESSAGE},
+    "PREG-07": {"applies_to": "mother", "guideline": "MoHFW/WHO ANC danger signs; persistent fever requires urgent evaluation", "referral": REFERRAL_MESSAGE},
+    "PREG-08": {"applies_to": "mother", "guideline": "MoHFW/WHO ANC danger signs; severe abdominal pain requires urgent evaluation", "referral": REFERRAL_MESSAGE},
+    "PREG-09": {"applies_to": "mother", "guideline": "MoHFW/WHO ANC danger signs; reduced fetal movement requires urgent evaluation", "referral": REFERRAL_MESSAGE},
+    "PREG-10": {"applies_to": "mother", "guideline": "MoHFW/WHO ANC danger signs; persistent vomiting requires evaluation", "referral": REFERRAL_MESSAGE},
+    "PREG-11": {"applies_to": "mother", "guideline": "MoHFW/WHO ANC danger signs; leaking fluid requires urgent evaluation", "referral": REFERRAL_MESSAGE},
+    "PREG-12": {"applies_to": "mother", "guideline": "MoHFW/WHO ANC danger signs; preterm labour symptoms require urgent evaluation", "referral": REFERRAL_MESSAGE},
+    "NEWB-01": {"applies_to": "newborn", "guideline": "MoHFW HBNC/IMNCI newborn danger signs; fever requires urgent referral", "referral": REFERRAL_MESSAGE},
+    "NEWB-02": {"applies_to": "newborn", "guideline": "MoHFW HBNC/IMNCI newborn danger signs; poor feeding/sucking requires urgent referral", "referral": REFERRAL_MESSAGE},
+    "NEWB-03": {"applies_to": "newborn", "guideline": "MoHFW HBNC/IMNCI newborn danger signs; lethargy/unconsciousness requires urgent referral", "referral": REFERRAL_MESSAGE},
+    "NEWB-04": {"applies_to": "newborn", "guideline": "MoHFW HBNC/IMNCI newborn danger signs; fast breathing requires urgent referral", "referral": REFERRAL_MESSAGE},
+    "NEWB-05": {"applies_to": "newborn", "guideline": "MoHFW HBNC/IMNCI newborn danger signs; chest indrawing requires urgent referral", "referral": REFERRAL_MESSAGE},
+    "NEWB-06": {"applies_to": "newborn", "guideline": "MoHFW HBNC/IMNCI newborn danger signs; cyanosis/bluish body requires urgent referral", "referral": REFERRAL_MESSAGE},
+    "NEWB-07": {"applies_to": "newborn", "guideline": "MoHFW HBNC/IMNCI newborn danger signs; early jaundice requires urgent referral", "referral": REFERRAL_MESSAGE},
+    "NEWB-08": {"applies_to": "newborn", "guideline": "MoHFW HBNC/IMNCI newborn danger signs; umbilical infection signs require referral", "referral": REFERRAL_MESSAGE},
+    "NEWB-09": {"applies_to": "newborn", "guideline": "MoHFW HBNC/IMNCI newborn danger signs; hypothermia/cold body requires urgent referral", "referral": REFERRAL_MESSAGE},
+    "NEWB-10": {"applies_to": "newborn", "guideline": "MoHFW HBNC/IMNCI newborn danger signs; poor urine output requires evaluation/referral", "referral": REFERRAL_MESSAGE},
+    "NEWB-11": {"applies_to": "newborn", "guideline": "MoHFW HBNC/IMNCI newborn danger signs; persistent crying requires evaluation", "referral": REFERRAL_MESSAGE},
+}
 
 # Negation words: if any appears within NEGATION_WINDOW tokens *before* the
 # matched phrase, the phrase is treated as NOT reported.
 NEGATION_TOKENS = {"no", "not", "without", "denies", "never", "none", "nothing"}
 NEGATION_WINDOW = 6  # tokens before the phrase
+CONTRAST_TOKENS = {"but", "however", "although", "though", "except", "yet"}
 
 _TOKEN_SPLIT = re.compile(r"[\s,.;:!?()\-]+")
 
 
 def _negated(text_lower: str, match_start: int) -> bool:
-    """True when a negation word sits within the last ~6 tokens before the match."""
+    """True when a negation word sits within the last ~6 tokens before the match,
+    unless a contrast/boundary breaks the negation scope."""
     prefix_tokens = [t for t in _TOKEN_SPLIT.split(text_lower[:match_start]) if t]
     window = prefix_tokens[-NEGATION_WINDOW:]
-    return any(tok in NEGATION_TOKENS for tok in window)
+    # If a contrast token appears after the negation in the window, treat as not negated.
+    neg_idxs = [i for i, tok in enumerate(window) if tok in NEGATION_TOKENS]
+    if not neg_idxs:
+        return False
+    last_neg = max(neg_idxs)
+    after_neg = window[last_neg + 1:]
+    if any(tok in CONTRAST_TOKENS for tok in after_neg):
+        return False
+    return True
 
 
-def detect_danger_signs(transcript: str, category: str | None = None) -> list[dict]:
-    """Scan a transcript for approved danger-sign phrases.
+def _collect_structured_text(structured: dict | None) -> str:
+    """Collect human-entered/verified textual observations from structured data.
+
+    Only text-like fields are scanned with the same approved phrase rules.
+    This does not invent thresholds; it allows verified structured observations
+    (e.g. danger signs, symptoms, notes) to trigger existing deterministic rules.
+    """
+    if not isinstance(structured, dict):
+        return ""
+    parts: list[str] = []
+    for k, v in structured.items():
+        if v is None:
+            continue
+        key = str(k).lower()
+        # Prefer observation/symptom/note-like fields; avoid IDs/codes/dates/names.
+        if not any(tok in key for tok in ("danger", "symptom", "complaint", "note", "observation", "finding", "concern", "problem", "remark")):
+            continue
+        if isinstance(v, str) and v.strip():
+            parts.append(v.strip())
+        elif isinstance(v, list):
+            for item in v:
+                if isinstance(item, str) and item.strip():
+                    parts.append(item.strip())
+                elif isinstance(item, dict):
+                    for vv in item.values():
+                        if isinstance(vv, str) and vv.strip():
+                            parts.append(vv.strip())
+    # de-dup while preserving order
+    seen = set()
+    out = []
+    for p in parts:
+        n = p.lower()
+        if n in seen:
+            continue
+        seen.add(n)
+        out.append(p)
+    return "\n".join(out)
+
+
+def detect_danger_signs(transcript: str, category: str | None = None, structured: dict | None = None) -> list[dict]:
+    """Scan transcript and relevant verified structured observations for approved danger-sign phrases.
 
     Matching: case-insensitive whole-word/phrase matching (word boundaries,
     so "fits" does not match "benefits"). Negation within the previous 6
@@ -98,9 +175,12 @@ def detect_danger_signs(transcript: str, category: str | None = None) -> list[di
         {rule_id, phrase, message, severity}
     where `phrase` is the EXACT triggering text as it appeared in the input.
     """
-    if not transcript or not transcript.strip():
+    structured_text = _collect_structured_text(structured)
+    combined = "\n".join([t for t in [transcript or "", structured_text] if t and t.strip()])
+    if not combined.strip():
         return []
-    text_lower = transcript.lower()
+    text_lower = combined.lower()
+    transcript = combined
 
     if category == "pregnancy":
         phrase_lists = [PREGNANCY_DANGER_PHRASES]
@@ -121,12 +201,23 @@ def detect_danger_signs(transcript: str, category: str | None = None) -> list[di
                 seen_spans.add(span)
                 if _negated(text_lower, m.start()):
                     continue  # negated — do NOT trigger
+                meta = RULE_METADATA.get(rule_id, {})
                 flags.append(
                     {
                         "rule_id": rule_id,
                         "phrase": transcript[m.start():m.end()],
-                        "message": REFERRAL_MESSAGE,
+                        "message": meta.get("referral", REFERRAL_MESSAGE),
                         "severity": severity,
+                        "applies_to": meta.get("applies_to", ""),
+                        "guideline_citation": meta.get("guideline", ""),
+                        "matched_text": transcript[m.start():m.end()],
+                        "evidence": {
+                            "matched_phrase": transcript[m.start():m.end()],
+                            "rule_id": rule_id,
+                            "severity": severity,
+                            "applies_to": meta.get("applies_to", ""),
+                            "guideline_citation": meta.get("guideline", ""),
+                        },
                     }
                 )
     # Stable order: as they appear in the transcript.
@@ -211,41 +302,45 @@ def weeks_pregnant_on(birth_or_lmp: date, on_date: date) -> int:
     return max(0, (on_date - birth_or_lmp).days // 7)
 
 
-def run_drift_engine(db) -> list[dict]:
-    """Follow-up drift engine across ALL beneficiaries.
+def _deterministic_followup_candidates(db) -> list[dict]:
+    """Compute current deterministic follow-up candidates from actual records/rules.
 
-    Output item shape (matches the API contract):
-        {beneficiary_id, name, category, issue, due_date, overdue_days,
-         recommended_action}
+    Returns candidate dicts suitable for persisted task generation (idempotent via dedup_key).
     """
-    from app.models import Beneficiary, FollowUp, ImmunisationRecord, NewbornRecord, PregnancyRecord, VisitRecord
+    from app.data_scope import visible_beneficiaries, visible_households
+    from app.models import Beneficiary, FollowUp, Household, HouseholdVisit, ImmunisationRecord, NewbornRecord, PregnancyRecord, VisitRecord
 
     today = date.today()
-    items: list[dict] = []
+    cands: list[dict] = []
 
-    beneficiaries = db.query(Beneficiary).all()
+    beneficiaries = visible_beneficiaries(db.query(Beneficiary)).all()
     for b in beneficiaries:
         visit_dates = sorted(
             (v.visit_date for v in db.query(VisitRecord).filter(VisitRecord.beneficiary_id == b.id).all()),
         )
 
         def add(issue: str, due: date | None, action: str, code: str, params: dict | None = None,
-                action_code: str | None = None):
-            overdue_days = max(0, (today - due).days) if due else 0
-            items.append(
+                action_code: str | None = None, dedup: str = "", type_: str | None = None, priority: str = "normal", visit_id: int | None = None):
+            if not due or not dedup:
+                return
+            cands.append(
                 {
                     "beneficiary_id": b.id,
                     "household_id": None,
                     "name": b.name,
-                    "category": b.category,
+                    "category": (type_ or b.category or "general"),
+                    "type": (type_ or b.category or "general"),
                     "issue": issue,
-                    # Machine-readable so the UI can localise the message.
                     "issue_code": code,
                     "issue_params": params or {},
                     "issue_action_code": action_code or code,
                     "due_date": due,
-                    "overdue_days": overdue_days,
                     "recommended_action": action,
+                    "dedup_key": dedup,
+                    "priority": priority,
+                    "visit_id": visit_id,
+                    "source_type": "rule",
+                    "source_ref": code,
                 }
             )
 
@@ -260,31 +355,27 @@ def run_drift_engine(db) -> list[dict]:
                 .first()
             )
             if preg is None or not visit_dates:
-                add("No ANC visit recorded yet", b.lmp_date + timedelta(days=ANC_INTERVAL_WEEKS_LT_28 * 7),
+                due = b.lmp_date + timedelta(days=ANC_INTERVAL_WEEKS_LT_28 * 7)
+                add("No ANC visit recorded yet", due,
                     "Schedule the first ANC checkup at the PHC",
-                    "anc_no_visit", action_code="schedule_first_anc")
+                    "anc_no_visit", action_code="schedule_first_anc",
+                    dedup=f"gen:ben:{b.id}:anc_no_visit", type_="anc", priority="high")
                 continue
             last_date = visit_dates[-1]
-            weeks_at_visit = preg.weeks_pregnant if preg.weeks_pregnant is not None else \
-                weeks_pregnant_on(b.lmp_date, last_date)
+            weeks_at_visit = preg.weeks_pregnant if preg.weeks_pregnant is not None else weeks_pregnant_on(b.lmp_date, last_date)
             required_gap = anc_interval_days(weeks_at_visit)
             due = last_date + timedelta(days=required_gap)
             if today > due:
                 add(
-                    f"ANC checkup overdue (last visit {last_date.isoformat()}, "
-                    f"required every {required_gap // 7} week(s) at {weeks_at_visit} weeks)",
+                    f"ANC checkup overdue (last visit {last_date.isoformat()}, required every {required_gap // 7} week(s) at {weeks_at_visit} weeks)",
                     due,
                     "Schedule an ANC visit and refer if danger signs were reported",
                     "anc_overdue",
-                    {
-                        "last_visit": last_date.isoformat(),
-                        "gap_weeks": required_gap // 7,
-                        "weeks": weeks_at_visit,
-                    },
+                    {"last_visit": last_date.isoformat(), "gap_weeks": required_gap // 7, "weeks": weeks_at_visit},
                     action_code="schedule_anc_refer",
+                    dedup=f"gen:ben:{b.id}:anc_overdue:{last_date.isoformat()}",
+                    type_="anc", priority="high", visit_id=preg.visit_id,
                 )
-            # Missing expected records in the latest ANC visit.
-            # NOTE: this is a record-keeping/verification gap, NOT a medical claim.
             if preg.weight_kg is None:
                 add(
                     "Missing record for verification: weight not recorded in the latest ANC visit",
@@ -293,6 +384,8 @@ def run_drift_engine(db) -> list[dict]:
                     "missing_weight",
                     {"last_visit": last_date.isoformat()},
                     action_code="complete_weight",
+                    dedup=f"gen:ben:{b.id}:missing_weight:{last_date.isoformat()}",
+                    type_="anc", priority="normal", visit_id=preg.visit_id,
                 )
             if preg.bp_sys is None or preg.bp_dia is None:
                 add(
@@ -302,6 +395,8 @@ def run_drift_engine(db) -> list[dict]:
                     "missing_bp",
                     {"last_visit": last_date.isoformat()},
                     action_code="complete_bp",
+                    dedup=f"gen:ben:{b.id}:missing_bp:{last_date.isoformat()}",
+                    type_="anc", priority="normal", visit_id=preg.visit_id,
                 )
 
         elif b.category == "newborn":
@@ -310,13 +405,6 @@ def run_drift_engine(db) -> list[dict]:
             age_days = (today - b.birth_date).days
             if age_days < 0 or age_days > 365:
                 continue
-            covered = set()
-            for vd in visit_dates:
-                v_days = (vd - b.birth_date).days
-                for day in NEWBORN_ALL_CHECKUP_DAYS:
-                    if day <= v_days <= day + 2:  # small grace window per checkup
-                        covered.add(day)
-            # A late visit also covers earlier checkpoints.
             covered_expanded = set()
             for v_day in [(vd - b.birth_date).days for vd in visit_dates]:
                 for day in NEWBORN_ALL_CHECKUP_DAYS:
@@ -334,8 +422,9 @@ def run_drift_engine(db) -> list[dict]:
                         "newborn_checkup_overdue",
                         {"label": label},
                         action_code="conduct_newborn_visit",
+                        dedup=f"gen:ben:{b.id}:newborn_checkup:{due.isoformat()}",
+                        type_="newborn", priority="high",
                     )
-            # jaundice/weight fields are checked via the latest newborn record
             latest_newborn = (
                 db.query(NewbornRecord)
                 .join(VisitRecord, NewbornRecord.visit_id == VisitRecord.id)
@@ -344,100 +433,68 @@ def run_drift_engine(db) -> list[dict]:
                 .first()
             )
             if latest_newborn is not None and latest_newborn.weight_kg is None:
+                last_d = visit_dates[-1] if visit_dates else today
                 add(
                     "Missing record for verification: weight not recorded in the latest newborn visit",
-                    visit_dates[-1] if visit_dates else None,
+                    last_d,
                     "Record the newborn's weight in the visit register",
                     "missing_newborn_weight",
-                    {"last_visit": visit_dates[-1].isoformat() if visit_dates else ""},
+                    {"last_visit": last_d.isoformat()},
                     action_code="record_newborn_weight",
+                    dedup=f"gen:ben:{b.id}:missing_newborn_weight:{last_d.isoformat()}",
+                    type_="newborn", priority="normal", visit_id=latest_newborn.visit_id,
                 )
 
-        else:  # "child" / "immunisation"
-            # Missed vaccination: next_due_date in the past with no later dose
-            # recorded (a dose given EARLY satisfies the schedule, so we check
-            # whether any record exists after this one).
+        else:  # child / immunisation
             records = (
                 db.query(ImmunisationRecord)
                 .filter(ImmunisationRecord.beneficiary_id == b.id)
                 .order_by(ImmunisationRecord.date_given.desc())
                 .all()
             )
-            given_dates = [r.date_given for r in records]
+            given_dates = [r.date_given for r in records if r.date_given]
             pending = [
                 r for r in records
                 if r.next_due_date is not None
                 and r.next_due_date < today
-                and not any(d > r.date_given for d in given_dates)
+                and not any(d and r.date_given and d > r.date_given for d in given_dates)
             ]
             if pending:
                 r = pending[0]
                 nxt = VACCINE_NEXT.get((r.vaccine_name or "").upper())
                 next_name = nxt[0] if nxt else f"{r.vaccine_name} booster"
                 add(
-                    f"Missed vaccination: {next_name} was due "
-                    f"{r.next_due_date.isoformat()} and no dose is recorded",
+                    f"Missed vaccination: {next_name} was due {r.next_due_date.isoformat()} and no dose is recorded",
                     r.next_due_date,
                     "Schedule the pending immunisation at the nearest session site",
                     "vaccination_missed",
                     {"vaccine": next_name, "due": r.next_due_date.isoformat()},
                     action_code="schedule_immunisation",
+                    dedup=f"gen:ben:{b.id}:vacc_missed:{next_name}:{r.next_due_date.isoformat()}",
+                    type_="vaccination", priority="high", visit_id=r.visit_id,
                 )
-            # Growth monitoring for children: monthly visit.
             if visit_dates:
                 gap = (today - visit_dates[-1]).days
                 if gap > 35:
+                    due = visit_dates[-1] + timedelta(days=30)
                     add(
                         f"Growth monitoring overdue (last visit {visit_dates[-1].isoformat()})",
-                        visit_dates[-1] + timedelta(days=30),
+                        due,
                         "Schedule the monthly growth-monitoring visit",
                         "growth_overdue",
                         {"last_visit": visit_dates[-1].isoformat()},
                         action_code="schedule_growth_visit",
+                        dedup=f"gen:ben:{b.id}:growth_overdue:{due.isoformat()}",
+                        type_="child", priority="normal",
                     )
 
-    # ------------------------------------------------------------------
-    # Household Health & Hygiene drift (deterministic rules)
-    # ------------------------------------------------------------------
-    from app.models import Household, HouseholdVisit
-
-    households = db.query(Household).all()
+    # Household hygiene follow-ups
+    households = visible_households(db.query(Household)).all()
     for h in households:
         label = f"{h.village} household ({h.qr_id})" if h.village else f"Household ({h.qr_id})"
-
-        def hadd(issue: str, due: date | None, action: str, code: str, params: dict | None = None,
-                 action_code: str | None = None):
-            overdue_days = max(0, (today - due).days) if due else 0
-            items.append(
-                {
-                    "beneficiary_id": None,
-                    "household_id": h.id,
-                    "name": label,
-                    "category": "household",
-                    "issue": issue,
-                    "issue_code": code,
-                    "issue_params": params or {},
-                    "issue_action_code": action_code or code,
-                    "due_date": due,
-                    "overdue_days": overdue_days,
-                    "recommended_action": action,
-                }
-            )
-
         h_fups = db.query(FollowUp).filter(FollowUp.household_id == h.id).all()
-        for fu in h_fups:
-            if fu.status in ("overdue", "missed"):
-                hadd(
-                    "Household hygiene follow-up overdue "
-                    f"(scheduled {fu.due_date.isoformat()})",
-                    fu.due_date,
-                    "Conduct the pending household hygiene follow-up visit",
-                    "household_followup_overdue",
-                    {"scheduled": fu.due_date.isoformat()},
-                    action_code="conduct_household_followup",
-                )
-
-        # Stagnant-water verification gap: reported but no follow-up exists.
+        # Existing overdue/due/missed household follow-ups are already persisted tasks and are surfaced
+        # directly from the active follow-ups table; do not generate duplicate copies for them.
         h_visits = (
             db.query(HouseholdVisit)
             .filter(HouseholdVisit.household_id == h.id)
@@ -449,92 +506,120 @@ def run_drift_engine(db) -> list[dict]:
                 latest = json.loads(h_visits[0].notes) if h_visits[0].notes else {}
             except Exception:
                 latest = {}
-            if latest.get("stagnant_water") and not h_fups:
-                hadd(
-                    "Stagnant water reported on "
-                    f"{h_visits[0].visit_date.isoformat()} — verification follow-up not scheduled",
-                    h_visits[0].visit_date,
-                    "Verify the family cleared the stagnation and record the follow-up visit",
-                    "stagnant_unverified",
-                    {"date": h_visits[0].visit_date.isoformat()},
-                    action_code="verify_stagnation",
+            # If stagnant water reported and no active (upcoming/due/overdue) household followup exists, suggest one
+            active_h = [f for f in h_fups if f.status in ("upcoming", "due", "overdue")]
+            if latest.get("stagnant_water") and not active_h:
+                cands.append(
+                    {
+                        "beneficiary_id": None,
+                        "household_id": h.id,
+                        "name": label,
+                        "category": "household",
+                        "type": "household",
+                        "issue": f"Stagnant water reported on {h_visits[0].visit_date.isoformat()} — verification follow-up not scheduled",
+                        "issue_code": "stagnant_unverified",
+                        "issue_params": {"date": h_visits[0].visit_date.isoformat()},
+                        "issue_action_code": "verify_stagnation",
+                        "due_date": h_visits[0].visit_date + timedelta(days=7),
+                        "recommended_action": "Verify the family cleared the stagnation and record the follow-up visit",
+                        "dedup_key": f"gen:hh:{h.id}:stagnant_unverified:{h_visits[0].visit_date.isoformat()}",
+                        "priority": "high",
+                        "visit_id": None,
+                        "source_type": "rule",
+                        "source_ref": "stagnant_unverified",
+                    }
                 )
 
-    # ------------------------------------------------------------------
-    # Generic nutrition / community follow-ups (deterministic)
-    # ------------------------------------------------------------------
-    nutrition_fups = (
-        db.query(FollowUp)
-        .filter(FollowUp.status.in_(["overdue", "missed"]),
-                FollowUp.type.in_(["nutrition", "community"]))
+    # Nutrition/community overdue persisted followups are already active tasks and surfaced directly;
+    # do not generate duplicate copies for existing overdue/due follow-up records.
+
+    return cands
+
+
+def sync_generated_followups(db) -> int:
+    """Idempotently upsert persisted follow-up tasks from deterministic rules/records."""
+    from app.services.followups import refresh_followup_statuses, upsert_generated_followup
+
+    refresh_followup_statuses(db)
+    cands = _deterministic_followup_candidates(db)
+    count = 0
+    for c in cands:
+        fu = upsert_generated_followup(
+            db,
+            dedup_key=c["dedup_key"],
+            beneficiary_id=c.get("beneficiary_id"),
+            household_id=c.get("household_id"),
+            visit_id=c.get("visit_id"),
+            type_=c.get("type") or c.get("category") or "general",
+            category=c.get("category") or c.get("type") or "general",
+            reason=c.get("issue") or "",
+            description=c.get("issue") or "",
+            recommended_action=c.get("recommended_action") or "",
+            due_date=c.get("due_date"),
+            priority=c.get("priority") or "normal",
+            source_type=c.get("source_type") or "rule",
+            source_id=None,
+            source_ref=c.get("source_ref") or c.get("issue_code") or "",
+            assigned_worker_id=None,
+        )
+        if fu:
+            count += 1
+    db.commit()
+    return count
+
+
+def run_drift_engine(db) -> list[dict]:
+    """Compatibility wrapper: return active persisted follow-up tasks as drift items."""
+    from app.data_scope import visible_followups
+    from app.services.followups import followup_to_dict, refresh_followup_statuses
+
+    refresh_followup_statuses(db)
+    try:
+        sync_generated_followups(db)
+    except Exception:
+        db.rollback()
+    followup_model = __import__('app.models', fromlist=['FollowUp']).FollowUp
+    rows = (
+        visible_followups(db.query(followup_model), db)
+        .filter(followup_model.status.in_(["upcoming", "due", "overdue"]))
+        .order_by(followup_model.status.in_(["overdue"]).desc(), followup_model.due_date.asc().nullslast())
         .all()
     )
-    ben_names = {b.id: b.name for b in beneficiaries}
-    for fu in nutrition_fups:
-        if fu.beneficiary_id is None:
-            continue
-        b = next((x for x in beneficiaries if x.id == fu.beneficiary_id), None)
-        if b is None:
-            continue
-        overdue_days = max(0, (today - fu.due_date).days)
-        is_nutrition = fu.type == "nutrition"
+    items = []
+    ben_cache, hh_cache, worker_cache = {}, {}, {}
+    for fu in rows:
+        d = followup_to_dict(db, fu, ben_cache, hh_cache, worker_cache)
+        name = d.get("beneficiary_name") or d.get("household_label") or "Follow-up"
         items.append(
             {
-                "beneficiary_id": b.id,
-                "household_id": None,
-                "name": b.name,
-                "category": b.category,
-                "issue": (
-                    "Nutrition follow-up overdue" if is_nutrition
-                    else "Community health follow-up overdue"
-                ) + f" (scheduled {fu.due_date.isoformat()})",
-                "issue_code": "nutrition_overdue" if is_nutrition else "community_overdue",
-                "issue_params": {"scheduled": fu.due_date.isoformat()},
-                "issue_action_code": (
-                    "conduct_nutrition_followup" if is_nutrition else "complete_community_followup"
-                ),
-                "due_date": fu.due_date,
-                "overdue_days": overdue_days,
-                "recommended_action": (
-                    "Conduct the pending nutrition follow-up and counselling visit"
-                    if is_nutrition
-                    else "Complete the pending community health follow-up"
-                ),
+                "beneficiary_id": d.get("beneficiary_id"),
+                "household_id": d.get("household_id"),
+                "name": name,
+                "category": d.get("category") or d.get("type") or "general",
+                "issue": d.get("reason") or d.get("description") or "Follow-up required",
+                "issue_code": "",
+                "issue_params": {},
+                "issue_action_code": "",
+                "due_date": d.get("due_date"),
+                "overdue_days": d.get("overdue_days") or 0,
+                "recommended_action": d.get("recommended_action") or "",
             }
         )
-
-    # Deduplicate identical issues for the same beneficiary.
-    seen: set[tuple] = set()
-    unique: list[dict] = []
-    for it in items:
-        key = (it["beneficiary_id"], it["household_id"], it["issue"])
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(it)
-    unique.sort(key=lambda it: (-it["overdue_days"], it["name"]))
-    return unique
+    return items
 
 
 def refresh_statuses(db) -> None:
-    """Hourly maintenance: mark overdue follow-ups and reminders.
+    """Hourly maintenance: refresh follow-up statuses and reminder statuses."""
+    from app.models import SmsReminder
+    from app.services.followups import refresh_followup_statuses
 
-    Called by the background scheduler in main.py. Deterministic and idempotent.
-    """
-    from app.models import FollowUp, SmsReminder
-
+    refresh_followup_statuses(db)
     today = date.today()
-
-    followups = db.query(FollowUp).filter(FollowUp.status == "upcoming").all()
-    for fu in followups:
-        if fu.due_date < today:
-            # Missed vaccinations get the dedicated "missed" status per the
-            # immunisation schedule rule; ANC/newborn get "overdue".
-            fu.status = "missed" if fu.type == "vaccination" else "overdue"
-
     reminders = db.query(SmsReminder).filter(SmsReminder.status == "scheduled").all()
+    changed = False
     for rem in reminders:
         if rem.due_date < today:
             rem.status = "overdue"
-
-    db.commit()
+            changed = True
+    if changed:
+        db.commit()

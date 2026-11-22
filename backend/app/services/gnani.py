@@ -1,86 +1,202 @@
-"""Gnani.ai adapters with explicit availability and honest demo behavior.
+"""Voice and AI adapters for ASHA Swar Nirantar.
 
-Three adapters:
-1. transcribe_stream() — Gnani Prisma v3.0 streaming STT over WebSocket.
-2. extract_fields()    — Gnani LLM structured extraction over HTTP.
-3. text_to_speech()    — Gnani Timbre v3.0 TTS over HTTP.
+STT: Gnani Prisma v3.0 streaming speech-to-text over WebSocket (unchanged).
+LLM: Google Gemini (official google-genai SDK) for Tara AI extraction/conversation.
+TTS: Gnani Timbre v3.0 text-to-speech over HTTP (unchanged).
 
-INTEGRATION MODES (env var GNANI_MODE):
-- "demo" (default): no Gnani network calls. STT is delegated to browser speech
-  recognition when available; the server never invents a transcript.
-- "live": real Gnani endpoints are used only when credentials and an
-  explicitly verified language configuration are present.
-
-Expected live configuration (backend/.env):
-    GNANI_MODE=live
-    GNANI_PRISMA_WS_URL=wss://...prisma-v3-stream-endpoint...?language={language}
-    GNANI_PRISMA_LANGUAGES=en,kn
-    GNANI_API_KEY=...
-    GNANI_API_SECRET=...
-    GNANI_LLM_URL=https://.../llm-extract
-    GNANI_LLM_KEY=...
-    GNANI_TIMBRE_URL=https://.../timbre-tts
-    GNANI_TIMBRE_KEY=...
-
-For the Prisma WS the adapter opens the upstream socket with headers:
-    Authorization: Bearer <GNANI_API_KEY>
-    apikey: <GNANI_API_KEY>
-    apisecret: <GNANI_API_SECRET>
-and forwards client binary PCM frames upstream, streaming JSON events
-back down. The exact header names should be confirmed against the Gnani
-Prisma v3.0 documentation during integration.
+STT/TTS live behavior is controlled by GNANI_MODE and existing Prisma/Timbre
+configuration/credentials. LLM behavior is controlled by GEMINI_API_KEY and
+GEMINI_MODEL. Live/provider claims are never made without required configuration.
 """
 from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 import urllib.request
-from typing import AsyncGenerator, Callable
+from typing import Any, AsyncGenerator, Callable
 
-from app import gnani_mode, get_env
+from app import get_env, gnani_requested_mode
 
+logger = logging.getLogger(__name__)
+
+DEFAULT_PRISMA_WS_URL = "wss://api.vachana.ai/stt/v3/stream"
+
+
+# =====================================================================
+# Configuration helpers (Prisma STT / Timbre TTS preserved; Gemini LLM)
+# =====================================================================
+
+def _prisma_ws_url() -> str:
+    return get_env("GNANI_PRISMA_WS_URL") or DEFAULT_PRISMA_WS_URL
+
+
+def _prisma_language_locale(language: str) -> str:
+    locales = {"en": "en-IN", "kn": "kn-IN", "hi": "hi-IN", "te": "te-IN", "ta": "ta-IN"}
+    code = (language or "").strip()
+    return locales.get(code.lower().split("-")[0], code)
+
+
+def _stt_live_enabled() -> bool:
+    """Live Prisma STT requires live mode and the Gnani API key (no secret)."""
+    return gnani_requested_mode() == "live" and bool(get_env("GNANI_API_KEY"))
+
+
+# Backward-compatible name used by voice routers for STT/Prisma availability.
 def _live_enabled() -> bool:
-    """Live mode requires its endpoint and both Prisma credentials."""
-    return (
-        gnani_mode() == "live"
-        and bool(get_env("GNANI_PRISMA_WS_URL"))
-        and bool(get_env("GNANI_API_KEY"))
-        and bool(get_env("GNANI_API_SECRET"))
-    )
+    return _stt_live_enabled()
 
 
 def prisma_language_enabled(language: str) -> bool:
-    """Only send audio for an explicitly verified language and URL template."""
+    """Only use Prisma for an explicitly verified language when live-configured."""
     configured = {
         value.strip().lower()
         for value in get_env("GNANI_PRISMA_LANGUAGES").split(",")
         if value.strip()
     }
     language_code = (language or "").strip().lower().split("-")[0]
-    return (
-        _live_enabled()
-        and "{language}" in get_env("GNANI_PRISMA_WS_URL")
-        and bool(language_code)
-        and language_code in configured
-    )
+    return _stt_live_enabled() and bool(language_code) and language_code in configured
 
 
 def prisma_connection_url(language: str) -> str:
-    """Fill the provider-documented locale placeholder in the configured URL."""
+    """Return the Prisma stream endpoint. Language is sent via headers per docs; URL
+    template placeholder {language} is still supported for legacy/custom configs."""
     from urllib.parse import quote
 
-    locales = {"en": "en-IN", "kn": "kn-IN", "hi": "hi-IN", "te": "te-IN", "ta": "ta-IN"}
-    locale = locales.get(language.strip().lower(), language.strip())
-    return get_env("GNANI_PRISMA_WS_URL").replace("{language}", quote(locale, safe=""))
+    url = _prisma_ws_url()
+    if "{language}" in url:
+        return url.replace("{language}", quote(_prisma_language_locale(language), safe=""))
+    return url
 
 
-def _llm_live_enabled() -> bool:
-    return gnani_mode() == "live" and bool(get_env("GNANI_LLM_URL")) and bool(get_env("GNANI_LLM_KEY"))
+def prisma_connection_headers(language: str) -> dict[str, str]:
+    """Official Prisma v3.0 realtime headers (single API key, no secret).
+
+    Evidence-based options (Gnani docs): Prisma v3.0 streaming supports model header,
+    language_code as single code / indic-auto / comma-separated 1-4 language hints,
+    and x-format including codemix/transcribe/verbatim/transliterate. We only send
+    optional format/language-hint overrides when explicitly configured via env; we do
+    not claim account support or code-mixing accuracy without real audio verification.
+    """
+    headers = {
+        "x-api-key-id": get_env("GNANI_API_KEY"),
+        "language_code": _prisma_language_code_for_request(language),
+        "x-sample-rate": "16000",
+    }
+    model = get_env("GNANI_PRISMA_MODEL") or "prisma-v3.0"
+    if model:
+        headers["model"] = model
+    fmt = (get_env("GNANI_PRISMA_FORMAT") or "").strip()
+    if fmt:
+        headers["x-format"] = fmt
+    return headers
+
+
+def _prisma_language_code_for_request(language: str) -> str:
+    """Build language_code for Prisma request.
+
+    Default: existing locale mapping (en-IN/kn-IN/hi-IN/te-IN/ta-IN).
+    Optional explicit override: GNANI_PRISMA_LANGUAGE_CODE_<BASE>=... (e.g. kn-IN,en-IN)
+    or GNANI_PRISMA_DEFAULT_LANGUAGE_CODE for non-mapped cases. Values are passed through
+    only as configured by operator; not invented.
+    """
+    raw = (language or "").strip()
+    base = raw.lower().split("-")[0] if raw else ""
+    override = (get_env(f"GNANI_PRISMA_LANGUAGE_CODE_{base.upper()}") or "").strip() if base else ""
+    if override:
+        return override
+    default_override = (get_env("GNANI_PRISMA_DEFAULT_LANGUAGE_CODE") or "").strip()
+    if default_override and base not in {"en", "kn", "hi", "te", "ta"}:
+        return default_override
+    return _prisma_language_locale(raw)
 
 
 def _tts_live_enabled() -> bool:
-    return gnani_mode() == "live" and bool(get_env("GNANI_TIMBRE_URL")) and bool(get_env("GNANI_TIMBRE_KEY"))
+    return gnani_requested_mode() == "live" and bool(get_env("GNANI_TIMBRE_URL")) and bool(get_env("GNANI_TIMBRE_KEY"))
+
+
+# ---------------------------------------------------------------------
+# Gemini LLM (Tara AI) configuration
+# ---------------------------------------------------------------------
+
+def _gemini_api_key() -> str:
+    # Backend-only configuration; never expose in responses/logs.
+    return (get_env("GEMINI_API_KEY") or "").strip()
+
+
+def _gemini_model() -> str:
+    return (get_env("GEMINI_MODEL") or "").strip()
+
+
+def _llm_live_enabled() -> bool:
+    """Gemini LLM is available only when API key and model are configured."""
+    return bool(_gemini_api_key()) and bool(_gemini_model())
+
+
+class GeminiLLMError(RuntimeError):
+    """Raised for handled Gemini configuration/request/response failures."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _safe_gemini_error(exc: Exception) -> GeminiLLMError:
+    """Map SDK/network/provider errors to safe, non-secret user-facing errors."""
+    msg = str(exc or "")
+    low = msg.lower()
+    name = exc.__class__.__name__.lower()
+    if isinstance(exc, GeminiLLMError):
+        return exc
+    if "api key" in low and ("invalid" in low or "missing" in low or "unauth" in low or "permission" in low) or "permission_denied" in low or "unauthenticated" in low:
+        return GeminiLLMError("invalid_api_key", "Gemini API key is invalid or not authorized.")
+    if "quota" in low or "resource_exhausted" in low or "exceeded" in low and "quota" in low:
+        return GeminiLLMError("quota_exhausted", "Gemini API quota is exhausted or unavailable.")
+    if "rate" in low and "limit" in low or "429" in low or "too many requests" in low:
+        return GeminiLLMError("rate_limited", "Gemini rate limit reached. Please try again shortly.")
+    if "model" in low and ("not found" in low or "unsupported" in low or "invalid" in low) or "model_not_found" in low:
+        return GeminiLLMError("unsupported_model", "The configured Gemini model is not supported or not available.")
+    if isinstance(exc, TimeoutError) or "timeout" in low or "timed out" in low or "deadline" in low:
+        return GeminiLLMError("timeout", "Gemini request timed out.")
+    if "json" in low or "parse" in low or "malformed" in low:
+        return GeminiLLMError("malformed_response", "Gemini returned a malformed response.")
+    if "empty" in low:
+        return GeminiLLMError("empty_response", "Gemini returned an empty response.")
+    if "connection" in low or "network" in low or "dns" in low or "unreachable" in low or "socket" in low:
+        return GeminiLLMError("network_error", "Could not reach Gemini due to a network error.")
+    # Generic fallback without leaking secrets/provider internals.
+    return GeminiLLMError("provider_error", "Gemini request failed.")
+
+
+def integration_status() -> dict:
+    """Report integration configuration honestly (no connectivity probe).
+
+    STT: Gnani Prisma. LLM: Google Gemini. TTS: Gnani Timbre.
+    "Live/configured" is never claimed without required configuration.
+    """
+    requested = gnani_requested_mode()
+    stt_configured = bool(get_env("GNANI_API_KEY")) and bool(
+        [v.strip() for v in get_env("GNANI_PRISMA_LANGUAGES").split(",") if v.strip()]
+    )
+    tts_configured = bool(get_env("GNANI_TIMBRE_URL")) and bool(get_env("GNANI_TIMBRE_KEY"))
+    llm_configured = _llm_live_enabled()
+    return {
+        "requested_mode": requested,
+        "stt_provider": "Gnani Prisma",
+        "stt_live_configured": requested == "live" and stt_configured,
+        "tts_provider": "Gnani Timbre",
+        "tts_live_configured": requested == "live" and tts_configured,
+        "llm_provider": "Google Gemini",
+        "llm_live_configured": llm_configured,
+        "gemini_configured": llm_configured,
+        "gemini_model": _gemini_model() if _gemini_model() else "",
+        "any_live_configured": (requested == "live" and (stt_configured or tts_configured)) or llm_configured,
+        # Backward-compatible aliases (older consumers)
+        "prisma_live_configured": requested == "live" and stt_configured,
+        "timbre_live_configured": requested == "live" and tts_configured,
+    }
 
 
 # =====================================================================
@@ -114,22 +230,24 @@ async def transcribe_stream(
     import websockets  # provided by uvicorn[standard]
 
     url = prisma_connection_url(language)
-    headers = {
-        "Authorization": f"Bearer {get_env('GNANI_API_KEY')}",
-        "apikey": get_env("GNANI_API_KEY"),
-        "apisecret": get_env("GNANI_API_SECRET"),
-    }
+    headers = prisma_connection_headers(language)
     try:
         upstream = await websockets.connect(url, extra_headers=headers)  # type: ignore[call-arg]
     except Exception as exc:
         response = getattr(exc, "response", None)
         status_code = getattr(exc, "status_code", None) or getattr(response, "status_code", None)
+        headers_resp = getattr(response, "headers", None) or getattr(exc, "headers", None)
+        reason = "provider_auth" if status_code in (401, 403) else "provider_unavailable"
         yield {
             "type": "status",
             "stage": "browser_fallback",
             "mode": "demo",
             "provider": "browser",
-            "reason": "provider_auth" if status_code in (401, 403) else "provider_unavailable",
+            "reason": reason,
+            "detail": {
+                "status_code": status_code,
+                "error": str(exc),
+            },
         }
         return
 
@@ -227,59 +345,227 @@ _EXTRACTION_SCHEMA = {
 }
 
 
+def _extract_json_object(text: str) -> dict | None:
+    """Best-effort extraction of a JSON object from model text (no code fences assumed)."""
+    if not text or not isinstance(text, str):
+        return None
+    s = text.strip()
+    # Strip common markdown fences
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.I)
+        s = re.sub(r"\s*```$", "", s)
+        s = s.strip()
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+    # Fallback: find first balanced-ish JSON object
+    start = s.find("{")
+    end = s.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            obj = json.loads(s[start : end + 1])
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            return None
+    return None
+
+
+def _gemini_client():
+    """Create a Gemini client from backend configuration. Raises GeminiLLMError on config issues."""
+    api_key = _gemini_api_key()
+    model = _gemini_model()
+    if not api_key:
+        raise GeminiLLMError("missing_api_key", "Gemini API key is not configured.")
+    if not model:
+        raise GeminiLLMError("missing_model", "Gemini model is not configured.")
+    try:
+        from google import genai  # type: ignore
+
+        return genai.Client(api_key=api_key), model
+    except Exception as exc:
+        # SDK import/init failures
+        raise GeminiLLMError("provider_error", "Gemini SDK is unavailable or failed to initialize.") from exc
+
+
+def _gemini_generate_text(prompt: str, *, response_mime_type: str | None = None, timeout_s: float = 20.0) -> str:
+    """Generate text from Gemini with robust error handling. Never returns fake success."""
+    client, model = _gemini_client()
+    try:
+        config: dict[str, Any] = {}
+        if response_mime_type:
+            config["response_mime_type"] = response_mime_type
+        # Prefer typed config if available, else pass dict (SDK accepts both in many versions)
+        try:
+            from google.genai import types  # type: ignore
+
+            gen_config = types.GenerateContentConfig(**config) if config else None
+            resp = client.models.generate_content(model=model, contents=prompt, config=gen_config)
+        except Exception:
+            resp = client.models.generate_content(model=model, contents=prompt, config=config or None)
+    except Exception as exc:
+        raise _safe_gemini_error(exc) from exc
+
+    try:
+        text = getattr(resp, "text", None)
+        if isinstance(text, str) and text.strip():
+            return text
+        # Fallback: inspect candidates/parts
+        candidates = getattr(resp, "candidates", None) or []
+        for cand in candidates:
+            content = getattr(cand, "content", None)
+            parts = getattr(content, "parts", None) if content is not None else None
+            if not parts and isinstance(content, dict):
+                parts = content.get("parts")
+            if parts:
+                chunks = []
+                for p in parts:
+                    t = getattr(p, "text", None)
+                    if t is None and isinstance(p, dict):
+                        t = p.get("text")
+                    if isinstance(t, str):
+                        chunks.append(t)
+                joined = "".join(chunks).strip()
+                if joined:
+                    return joined
+    except Exception as exc:
+        raise GeminiLLMError("malformed_response", "Gemini returned a malformed response.") from exc
+
+    raise GeminiLLMError("empty_response", "Gemini returned an empty response.")
+
+
+def _gemini_extract_live(transcript: str, language: str) -> dict | None:
+    """Extract structured visit fields using Gemini. Returns validated dict or None on failure."""
+    if not _llm_live_enabled():
+        return None
+    transcript = (transcript or "").strip()
+    if not transcript:
+        return None
+    prompt = (
+        "You are Tara, an AI assistant for ASHA community health workers in the ASHA Swar Nirantar app. "
+        "Extract healthcare visit fields from the transcript below. "
+        "Do not diagnose, do not prescribe, and do not invent symptoms, dates, measurements, or beneficiary details. "
+        "Preserve reported danger signs accurately. If information is missing or ambiguous, leave the field null/omitted (do not guess). "
+        "Extract beneficiary_name only when a person/beneficiary name is explicitly stated in the transcript; never use ASHA worker name, household label, or guess a name. "
+        "Support Kannada, English, Kannada-English code-mix, and other supported languages by understanding meaning from the transcript. "
+        "Reply with ONLY a single JSON object matching this schema (use null for unknown values; use ISO YYYY-MM-DD for dates when explicitly stated, else omit):\n"
+        f"{json.dumps(_EXTRACTION_SCHEMA, ensure_ascii=False)}\n\n"
+        f"Language hint: {language}\n"
+        f"Transcript:\n{transcript}"
+    )
+    try:
+        text = _gemini_generate_text(prompt, response_mime_type="application/json")
+        obj = _extract_json_object(text)
+        if not isinstance(obj, dict):
+            # try again without mime hint if provider wrapped oddly
+            obj = _extract_json_object(_gemini_generate_text(prompt))
+        if not isinstance(obj, dict):
+            return None
+        # Accept wrapped shapes defensively
+        if "structured" in obj and isinstance(obj.get("structured"), dict):
+            obj = obj["structured"]
+        data = obj.get("data", obj) if isinstance(obj, dict) else None
+        if isinstance(data, dict) and "structured" in data and isinstance(data["structured"], dict):
+            data = data["structured"]
+        if not isinstance(data, dict):
+            return None
+        validated = _validate_structured(data)
+        return validated if isinstance(validated, dict) and validated else None
+    except Exception:
+        # Never fake a successful live/Gemini result; caller will fall back safely.
+        return None
+
+
+def _is_latin_dominant(text: str) -> bool:
+    """True when transcript is mostly Latin/script-neutral (code-mixed kn-en/hi-en)."""
+    letters = [ch for ch in (text or "") if ch.isalpha()]
+    if not letters:
+        return True
+    latin = sum(1 for ch in letters if ("a" <= ch.lower() <= "z"))
+    return (latin / max(1, len(letters))) >= 0.45
+
+
+def _is_kannada_script_path(language: str, transcript: str) -> bool:
+    lang = (language or "").lower().strip()
+    if lang == "kn":
+        return not _is_latin_dominant(transcript)
+    if lang.startswith("kn-") or lang.endswith("-kn"):
+        return not _is_latin_dominant(transcript)
+    return False
+
+
+def _normalize_visit_names(structured: dict | None) -> dict:
+    """Normalize the one name shared by structured extraction fields."""
+    result = dict(structured or {})
+    personal = dict(result.get("personal_details") or {})
+    raw = dict(result.get("raw_structured") or {})
+
+    candidates = (
+        result.get("beneficiary_name"),
+        personal.get("name"),
+        raw.get("beneficiary_name"),
+        raw.get("name"),
+    )
+    name = next((str(v).strip() for v in candidates if isinstance(v, str) and str(v).strip()), None)
+
+    # Precedence for conflicts: top-level beneficiary_name is the canonical
+    # extraction value, then personal_details.name, then raw extraction.
+    if name:
+        result["beneficiary_name"] = name
+        personal["name"] = name
+    else:
+        result.pop("beneficiary_name", None)
+        personal.pop("name", None)
+
+    if personal:
+        result["personal_details"] = personal
+    raw_name = raw.get("beneficiary_name") or raw.get("name")
+    if name:
+        raw["beneficiary_name"] = name
+        raw["name"] = name
+    elif raw_name:
+        raw.pop("beneficiary_name", None)
+        raw.pop("name", None)
+    if raw:
+        result["raw_structured"] = raw
+    return result
+
+
 def extract_fields(transcript: str, language: str = "en") -> tuple[dict, str]:
     """Extract structured fields from a transcript.
 
-    Returns (structured_dict, mode) where mode is "live" or "demo".
-
-    LIVE PATH: posts the transcript + JSON schema to the Gnani LLM
-    endpoint; a schema-validated JSON body comes back. Any failure falls
-    back to the demo parser (labelled demo).
+    Returns (structured_dict, mode) where mode is "live" (Gemini) or "demo"
+    (deterministic fallback). Gemini is attempted when configured; any failure,
+    timeout, malformed/empty response, or unavailable config falls back to the
+    deterministic parser so existing functionality remains available.
     """
-    if _llm_live_enabled() and language.lower().split("-")[0] != "kn":
-        try:
-            live = _llm_extract_live(transcript, language)
-            if live is not None:
-                return live, "live"
-        except Exception:
-            pass  # fall through to demo — never fake a live result
-    if language.lower().split("-")[0] == "kn":
-        return _extract_kannada(transcript), "demo"
-    return _extract_demo(transcript), "demo"
+    transcript = transcript or ""
+    use_kannada = _is_kannada_script_path(language, transcript)
+    if _llm_live_enabled():
+        live = _gemini_extract_live(transcript, language)
+        if live is not None:
+            # Merge deterministic cues for robustness (without inventing data): if Gemini omitted
+            # clearly parseable local cues, keep Gemini result authoritative where present.
+            # We only fill missing keys from deterministic parse.
+            try:
+                fallback = _extract_kannada(transcript) if use_kannada else _extract_demo(transcript)
+                for k, v in (fallback or {}).items():
+                    if k not in live or live.get(k) in (None, "", []):
+                        live[k] = v
+                if live.get("beneficiary_name") and fallback.get("beneficiary_name") and str(live.get("beneficiary_name")).strip().lower() != str(fallback.get("beneficiary_name")).strip().lower():
+                    logger.warning("beneficiary name extraction sources conflict; precedence=Gemini-for-name")
+            except Exception:
+                pass
+            live = _normalize_visit_names(live)
+            return live, "live"
 
-
-def _llm_extract_live(transcript: str, language: str) -> dict | None:
-    """Call the Gnani LLM endpoint. Returns None on any problem."""
-    url = get_env("GNANI_LLM_URL")
-    payload = json.dumps(
-        {
-            "transcript": transcript,
-            "language": language,
-            "instruction": (
-                "Extract healthcare visit fields from the transcript. "
-                "Reply with ONLY a JSON object matching this schema: "
-                + json.dumps(_EXTRACTION_SCHEMA)
-            ),
-        }
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {get_env('GNANI_LLM_KEY')}",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-    # Accept either the raw object or {"data": {...}} / {"choices":[{...}]} shapes.
-    data = body.get("data", body) if isinstance(body, dict) else None
-    if isinstance(data, dict) and "structured" in data:
-        data = data["structured"]
-    if not isinstance(data, dict):
-        return None
-    return _validate_structured(data)
+    # Deterministic fallback (preserved behavior)
+    if use_kannada:
+        return _normalize_visit_names(_extract_kannada(transcript)), "demo"
+    return _normalize_visit_names(_extract_demo(transcript)), "demo"
 
 
 def _validate_structured(data: dict) -> dict:
@@ -340,8 +626,15 @@ def _as_float(value) -> float | None:
 # DEMO parser: deterministic regex/keyword extraction (no LLM involved).
 # Handles the sample sentence and common spoken variants.
 # ---------------------------------------------------------------------
-_NAME_AFTER_VISITED = re.compile(r"\bvisited\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)", re.I)
-_NAME_BEFORE_VISITED = re.compile(r"\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s+was\s+visited\b|\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s+visited\b", re.I)
+_NAME_AFTER_VISITED = re.compile(
+    r"\b(?:visited|met|saw|checked|examined)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?|[^\s,.;!?]+)",
+    re.I,
+)
+_NAME_BEFORE_VISITED = re.compile(
+    r"\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?|[^\s,.;!?]+)\s+was\s+visited\b|"
+    r"\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?|[^\s,.;!?]+)\s+visited\b",
+    re.I,
+)
 _WEEKS_PREGNANT = re.compile(r"\b(\d{1,2})\s*weeks?\s+pregnant\b", re.I)
 _BP_OVER = re.compile(r"\b(\d{2,3})\s+(?:over|upon)\s+(\d{2,3})\b", re.I)
 _BP_SLASH = re.compile(r"\b(\d{2,3})\s*/\s*(\d{2,3})\b")
@@ -390,11 +683,40 @@ _HANDWASH = re.compile(
 _AWARENESS = re.compile(
     r"\b(?:advised|counselled|counseled|educated|explained|awareness\s+session|health\s+talk)\b", re.I)
 _FOLLOW_UP_IN = re.compile(r"\bfollow[- ]?up\s+(?:visit\s+)?(?:in|after)\s+(\d{1,2})\s*days?\b", re.I)
+# MCH/code-mixed patterns (kn-en, hi-en, en) - deterministic, no external LLM.
+_MCH_GESTATION_MONTHS = re.compile(r"\b(\d{1,2})\s*(?:months?\s+pregnant|mahine|mahina|thingalu|tingalu|maasam|masam)\b", re.I)
+_MCH_HB = re.compile(r"\b(?:hb|hemoglobin)\s*[:=]?\s*(\d+(?:\.\d+)?)\b", re.I)
+_MCH_WEIGHT = re.compile(r"\bweight\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(?:kg|kilo|kilos)?\b", re.I)
+_MCH_TEMP_C = re.compile(r"\b(?:temp(?:erature)?|jwara|bukhar)\s*[:=]?\s*(\d{2}(?:\.\d+)?)\b", re.I)
+_MCH_BP = re.compile(r"\b(?:bp|blood\s*pressure)\s*[:=]?\s*(\d{2,3})\s*/\s*(\d{2,3})\b", re.I)
+_MCH_IFA_YES = re.compile(r"\b(?:ifa\s+(?:tablets?\s+)?(?:given|di|dili|kottidini|kottide|yes)|ifa\s+goli\s+(?:di|dili|kottidini|kottide|kotidini))\b", re.I)
+_MCH_IFA_NO = re.compile(r"\b(?:ifa\s+(?:tablets?\s+)?(?:not\s+given|nahi\s+di|illa|kodlilla|kodilla|not\s+given)|ifa\s+goli\s+(?:nahi\s+di|kodlilla|kodilla|illa)|ifa\s+not\s+given)\b", re.I)
+_MCH_TD = re.compile(r"\b(?:tt|td)\s*(?:dose\s*)?(\d)\b", re.I)
+_MCH_TD_DONE = re.compile(r"\b(?:tt|td)\s*(?:dose\s*)?(\d)\s*(?:done|given|kottidini|kottide|lagaya|lagayi|diya)\b", re.I)
+_MCH_NEXT_VISIT = re.compile(r"\b(?:next\s+(?:anc|visit|immuni[sz]ation)?\s*(?:visit\s*)?(?:in\s*)?|agla\s+(?:anc\s*)?|next\s+anc\s*)(\d{1,3})\s*(?:days?|din|dinakke|dina|baad)\b", re.I)
+_MCH_NEXT_VISIT2 = re.compile(r"\b(\d{1,3})\s*(?:dinakke|din\s+baad)\b", re.I)
+_MCH_NEWBORN_DAY = re.compile(r"\b(?:day\s*(\d{1,3})\s*visit|(?:hbnc\s*)?day\s*(\d{1,3})|(\d{1,3})\s*din\s+ka\s+pnc)\b", re.I)
+_MCH_VACCINE = re.compile(r"\b(pentavalent(?:[- ]?\d)?|bcg|opv(?:[- ]?\d)?|mr\s*[- ]?\d|measles[- ]rubella[- ]?\d|hep[- ]?b\s+birth\s+dose|hepb\s+birth\s+dose|hepatitis[- ]b(?:\s+birth\s+dose)?|dpt(?:[- ]?\d)?|rotavirus(?:[- ]?\d)?|pcv(?:[- ]?\d)?|ipv(?:[- ]?\d)?)\b", re.I)
+_MCH_VACCINE_PENDING = re.compile(r"\b(?:baki\s+ide|baaki\s+hai|pending|due)\b", re.I)
+_MCH_DANGER = {
+    "reduced_fetal_movement": re.compile(r"\b(?:maga\s+ochadtilla|baby\s+movement\s+(?:kam|reduced|not\s+felt)|reduced\s+fetal\s+movement)\b", re.I),
+    "bleeding": re.compile(r"\b(?:blood\s+hogta\s+ide|bleeding|rakta\s+srava|raktasrav)\b", re.I),
+    "high_fever": re.compile(r"\b(?:jwara\s+jasti\s+ide|tez\s+bukhar|high\s+fever|fever\s+high)\b", re.I),
+    "convulsions": re.compile(r"\b(?:convulsions?|fits|akadi)\b", re.I),
+    "swelling": re.compile(r"\b(?:swelling|edema|soojan|neeru)\b", re.I),
+}
+_MCH_NAME_GE_KO = re.compile(r"^\s*([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s+(?:ge|ko|ka|ki|ke)\b", re.I)
+_MCH_NAME_BABY = re.compile(r"\b([A-Z][a-zA-Z]+)\s+(?:baby|ka\s+baby|ke\s+baby|baby\s+ge)\b", re.I)
+_MCH_NAME_NEWBORN = re.compile(r"\b([A-Z][a-zA-Z]+)(?:'s|\s+ka|\s+ke)\s+(?:newborn|baby)\b", re.I)
 
 # --- Extended patterns for new fields ---
 _WORD_TO_NUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
 _AGE_YEARS_OLD = re.compile(r"\b(\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten)\s*years?\s*old\b", re.I)
 _AGE_IS = re.compile(r"\bage\s*(?:is|:)?\s*(\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten)\b", re.I)
+# "Ravi, aged 65" / "Anu, aged two years"
+_AGE_AGED = re.compile(
+    r"\baged\s*(\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten)\b", re.I
+)
 _HEIGHT = re.compile(r"\b(\d{2,3})\s*(?:cm|centimeters?)\b", re.I)
 _BLOOD_SUGAR = re.compile(r"\bblood\s+sugar\s*(?:is|of|at)?\s*(\d+(?:\.\d+)?)\b", re.I)
 _IFA_YES = re.compile(r"\b(?:taking|given|started|receiving)\s+IFA\b|\bIFA\s+tablets?\s+(?:given|started|regular|taking|provided)\b", re.I)
@@ -425,19 +747,88 @@ def _extract_demo(transcript: str) -> dict:
     structured: dict = {"visit_date": date_today_iso()}
     text = transcript or ""
 
+    _ROLE_BLOCK = {
+        "household","house","the","a","an","asha","worker","asha worker","doctor","nurse","an m","anm",
+        "supervisor","beneficiary","patient","mother","father","child","baby","newborn","family"
+    }
+    def _looks_like_worker_role(name, full_text):
+        nl=(name or "").lower()
+        tl=(full_text or "").lower()
+        # If the same name is explicitly described as ASHA/worker/doctor/nurse, don't treat as beneficiary.
+        return bool(re.search(rf"\b{re.escape(nl)}\b\s+(?:is|was)\s+(?:the\s+|an?\s+)?(?:asha|asha worker|worker|doctor|nurse|anm)\b", tl)) or bool(re.search(rf"\b(?:asha worker|worker|doctor|nurse|anm)\s+{re.escape(nl)}\b", tl))
     m = _NAME_AFTER_VISITED.search(text)
     if m:
-        structured["beneficiary_name"] = _trim_name(m.group(1).strip())
-    else:
+        candidate = _trim_name(m.group(1).strip(" .,!?:;\"'"))
+        cl = (candidate or "").lower()
+        if candidate and cl not in _NAME_STOPWORDS and cl not in _ROLE_BLOCK and not cl.startswith(("asha ","worker ","doctor ","nurse ")) and not _looks_like_worker_role(candidate, text):
+            structured["beneficiary_name"] = candidate[:1].upper() + candidate[1:] if candidate.islower() else candidate
+    if "beneficiary_name" not in structured:
         m = _NAME_BEFORE_VISITED.search(text)
         if m:
-            structured["beneficiary_name"] = _trim_name((m.group(1) or m.group(2) or "").strip())
+            candidate = _trim_name((m.group(1) or m.group(2) or "").strip(" .,!?:;\"'"))
+            cl = (candidate or "").lower()
+            if candidate and cl not in _NAME_STOPWORDS and cl not in _ROLE_BLOCK and not cl.startswith(("asha ","worker ","doctor ","nurse ")):
+                structured["beneficiary_name"] = candidate[:1].upper() + candidate[1:] if candidate.islower() else candidate
     # Household speech ("Visited household 24…") is not a beneficiary name —
     # the household_id field carries the subject instead.
     if "beneficiary_name" in structured:
         bn = structured["beneficiary_name"].lower()
         if bn in ("household", "house") or bn.startswith(("household ", "house ")):
             del structured["beneficiary_name"]
+    if "beneficiary_name" not in structured:
+        m = _MCH_NAME_NEWBORN.search(text) or _MCH_NAME_BABY.search(text) or _MCH_NAME_GE_KO.search(text)
+        if m:
+            candidate = _trim_name(m.group(1).strip(" .,!?:;\"'"))
+            if candidate and candidate.lower() not in _NAME_STOPWORDS:
+                structured["beneficiary_name"] = candidate[:1].upper() + candidate[1:] if candidate.islower() else candidate
+    if "beneficiary_name" not in structured:
+        m = re.match(r"^\s*([A-Z][a-zA-Z]{2,30}(?:\s+[A-Z][a-zA-Z]{2,30})?)\s*[,:-]", text)
+        if m:
+            candidate = _trim_name(m.group(1).strip())
+            if candidate.lower() not in _NAME_STOPWORDS | {"visited","met","saw","checked","examined","today","anc","pnc","hbnc","baby","newborn"}:
+                structured["beneficiary_name"] = candidate
+    if "beneficiary_name" not in structured:
+        # Common spoken pattern: "Manasvi is 18 years old..." / "Lakshmi has severe headache" / "madhu is a 13..."
+        m = re.search(r"(?:^|[.!?]\s+|\bvisited\s+)([A-Za-z][A-Za-z]{1,30}(?:\s+[A-Za-z][A-Za-z]{1,30})?)\s+(?:is|was|has|had|aged|turned|reports|complains|feels|presented)\b", text, re.I)
+        if m:
+            candidate = _trim_name(m.group(1).strip(" .,!?:;\"'"))
+            blocked = _NAME_STOPWORDS | {
+                "visited","met","saw","checked","examined","today","anc","pnc","hbnc","baby","newborn","child",
+                "mother","father","patient","beneficiary","household","house","family","she","he","they","this",
+                "that","there","weight","height","temperature","bp","blood","age","visit","follow","next",
+                "the","a","an","my","her","his","their","our","i","we","asha","worker","doctor","nurse","sir","madam",
+                "name","person","someone","anyone","everyone"
+            }
+            blocked_phrases = {
+                "the beneficiary","the patient","this patient","this beneficiary","that beneficiary","that patient",
+                "patient name","beneficiary name","the name","my name","her name","his name","their name",
+                "a patient","a beneficiary","the child","the mother","the father","the baby","this child"
+            }
+            cl = candidate.lower().strip()
+            # Strip leading role labels if present: "Patient Priya" -> "Priya"
+            for prefix in ("patient ", "beneficiary ", "child ", "mother ", "father ", "baby ", "newborn "):
+                if cl.startswith(prefix):
+                    candidate = candidate[len(prefix):].strip()
+                    cl = candidate.lower().strip()
+                    break
+            if candidate and cl not in blocked and cl not in blocked_phrases and not cl.startswith(("household ", "house ", "the ", "this ", "that ", "a ", "an ")) and not _looks_like_worker_role(candidate, text):
+                structured["beneficiary_name"] = candidate if not candidate.islower() else candidate[:1].upper() + candidate[1:]
+    if "beneficiary_name" not in structured:
+        # "Beneficiary/patient name is Madhu" / "This is Madhu"
+        m = re.search(r"\b(?:(?:beneficiary(?:\s+name)?|patient(?:\s+name)?|name|person)\s*(?:is|:|-)\s*|(?:this is|that is)\s+)([A-Za-z][A-Za-z]{1,30}(?:\s+[A-Za-z][A-Za-z]{1,30})?)\b", text, re.I)
+        if m:
+            candidate = _trim_name(m.group(1).strip(" .,!?:;\"'"))
+            blocked = {"unknown","not","none","na","n/a","beneficiary","patient","household","a","an","the","she","he","they","pregnant","here","there","just","only","also"}
+            if candidate and candidate.lower() not in blocked and not _looks_like_worker_role(candidate, text):
+                structured["beneficiary_name"] = candidate if not candidate.islower() else candidate[:1].upper() + candidate[1:]
+    if "beneficiary_name" not in structured:
+        # "Madhu, age 13" / "Madhu age 13"
+        m = re.search(r"(?:^|[.!?]\s+)([A-Za-z][A-Za-z]{1,30}(?:\s+[A-Za-z][A-Za-z]{1,30})?)\s*[,-]?\s*(?:age|aged)\b", text, re.I)
+        if m:
+            candidate = _trim_name(m.group(1).strip(" .,!?:;\"'"))
+            blocked = _NAME_STOPWORDS | {"patient","beneficiary","child","mother","father","baby","he","she","they","age"}
+            if candidate and candidate.lower() not in blocked and not _looks_like_worker_role(candidate, text):
+                structured["beneficiary_name"] = candidate if not candidate.islower() else candidate[:1].upper() + candidate[1:]
 
     m = _WEEKS_PREGNANT.search(text)
     if m:
@@ -534,7 +925,12 @@ def _extract_demo(transcript: str) -> dict:
         structured["follow_up_days"] = int(m.group(1))
 
     # --- New extended field extraction ---
-    m = _AGE_YEARS_OLD.search(text) or _AGE_IS.search(text)
+    # "Ravi, aged 65", "Anu, aged two years", "65 years old", "age is 30"
+    m = (
+        _AGE_YEARS_OLD.search(text)
+        or _AGE_IS.search(text)
+        or _AGE_AGED.search(text)
+    )
     if m:
         raw_a = m.group(1).lower()
         structured["age"] = _WORD_TO_NUM.get(raw_a, int(raw_a) if raw_a.isdigit() else None)
@@ -582,19 +978,104 @@ def _extract_demo(transcript: str) -> dict:
     if m_rel:
         structured["relation"] = m_rel.group(1).lower()
 
-    # Category inference
+    # --- MCH/code-mixed extraction (deterministic, additive) ---
+    m = _MCH_GESTATION_MONTHS.search(text)
+    if m and "gestation_months" not in structured:
+        gm = int(m.group(1))
+        if 1 <= gm <= 10:
+            structured["gestation_months"] = gm
+            if "weeks_pregnant" not in structured:
+                structured["weeks_pregnant"] = gm * 4
+    m = _MCH_HB.search(text)
+    if m and "hemoglobin" not in structured:
+        try: structured["hemoglobin"] = float(m.group(1))
+        except Exception: pass
+    m = _MCH_WEIGHT.search(text)
+    if m and "weight_kg" not in structured:
+        try: structured["weight_kg"] = float(m.group(1))
+        except Exception: pass
+    m = _MCH_BP.search(text)
+    if m and "bp_sys" not in structured:
+        structured["bp_sys"] = int(m.group(1)); structured["bp_dia"] = int(m.group(2))
+    m = _MCH_TEMP_C.search(text)
+    if m and "temperature" not in structured:
+        try:
+            tv = float(m.group(1))
+            # Only accept plausible body temp C; avoid capturing unrelated numbers
+            if 30.0 <= tv <= 45.0:
+                structured["temperature"] = tv
+        except Exception: pass
+    if _MCH_IFA_NO.search(text):
+        structured["ifa_tablets"] = False
+        structured["ifa_given"] = False
+    elif _MCH_IFA_YES.search(text):
+        structured["ifa_tablets"] = True
+        structured["ifa_given"] = True
+    m = _MCH_TD_DONE.search(text) or _MCH_TD.search(text)
+    if m and "td_vaccine" not in structured:
+        structured["td_vaccine"] = f"TT{m.group(1)}"
+        structured["td_dose"] = int(m.group(1))
+    m = _MCH_NEXT_VISIT.search(text) or _MCH_NEXT_VISIT2.search(text)
+    if m and "follow_up_days" not in structured:
+        try: structured["follow_up_days"] = int(m.group(1))
+        except Exception: pass
+    # Do not invent next_visit_days when not explicitly stated in text.
+    m = _MCH_NEWBORN_DAY.search(text)
+    if m and "newborn_day" not in structured:
+        for g in m.groups():
+            if g:
+                try: structured["newborn_day"] = int(g)
+                except Exception: pass
+                break
+    m = _MCH_VACCINE.search(text)
+    if m:
+        vname = m.group(1).strip()
+        vnorm = re.sub(r"\s+", " ", vname).strip()
+        vnorm = vnorm.replace("measles rubella", "Measles-Rubella").replace("Measles rubella", "Measles-Rubella")
+        if re.match(r"^pentavalent", vnorm, re.I):
+            d = re.search(r"(\d)", vnorm)
+            vnorm = f"Pentavalent-{d.group(1)}" if d else "Pentavalent"
+        if re.match(r"^bcg$", vnorm, re.I): vnorm = "BCG"
+        if re.match(r"^opv", vnorm, re.I):
+            d=re.search(r"(\d)", vnorm); vnorm=f"OPV-{d.group(1)}" if d else "OPV"
+        if re.match(r"^mr", vnorm, re.I):
+            d=re.search(r"(\d)", vnorm); vnorm=f"Measles-Rubella-{d.group(1)}" if d else "Measles-Rubella"
+        if re.match(r"^hep", vnorm, re.I):
+            vnorm = "Hep-B birth dose" if "birth" in vnorm.lower() else "Hepatitis-B"
+        structured["vaccine_name"] = vnorm
+        if _MCH_VACCINE_PENDING.search(text):
+            structured["vaccine_status"] = "pending"
+        else:
+            structured["vaccine_status"] = "given"
+    # Danger signs (MCH code-mixed)
+    mch_dangers = []
+    for k, pat in _MCH_DANGER.items():
+        if pat.search(text):
+            mch_dangers.append(k)
+    if mch_dangers:
+        structured["danger_signs"] = sorted(set(mch_dangers))
+        structured["symptoms"] = sorted(set((structured.get("symptoms") or []) + mch_dangers))
+
+    # Category inference (evidence-based; do not guess from age alone when clinical context is clear)
     age_value = structured.get("age")
-    if "weeks_pregnant" in structured or re.search(r"\bpregnant|pregnancy|anc\b", text, re.I):
+    is_pregnancy = "weeks_pregnant" in structured or "gestation_months" in structured or re.search(r"\bpregnant|pregnancy|anc\b", text, re.I)
+    is_newborn = "newborn_day" in structured or "feeding" in structured or "jaundice" in structured or re.search(r"\bnewborn|neonat|born\s+today|hbnc|pnc\s+visit\b", text, re.I)
+    is_immunisation = "vaccine_name" in structured or re.search(r"\bvaccination|vaccine|immunisation|immunization|hakidini|laga\s+diya|baaki\s+hai|baki\s+ide\b", text, re.I)
+    is_household = "water_source" in structured or "toilet_available" in structured or "waste_disposal" in structured or "drainage" in structured
+    is_elderly = (age_value is not None and age_value >= 60) or "mobility" in structured or ("blood_sugar" in structured and not is_pregnancy and not is_newborn)
+    is_child = (age_value is not None and 0 <= age_value <= 12) or re.search(r"\bchild|toddler|baby\b", text, re.I)
+
+    if is_pregnancy:
         structured["category"] = "pregnancy"
-    elif "feeding" in structured or "jaundice" in structured or re.search(r"\bnewborn|neonat|born\s+today\b", text, re.I):
+    elif is_newborn:
         structured["category"] = "newborn"
-    elif "vaccine_name" in structured:
+    elif is_immunisation and not is_elderly:
         structured["category"] = "immunisation"
-    elif (age_value is not None and age_value >= 60) or "mobility" in structured or "blood_sugar" in structured:
+    elif is_elderly:
         structured["category"] = "elderly"
-    elif (age_value is not None and age_value <= 12) or re.search(r"\bchild|toddler|baby|vaccination|vaccine|immunisation\b", text, re.I):
+    elif is_child and not is_elderly:
         structured["category"] = "child"
-    elif "water_source" in structured or "toilet_available" in structured:
+    elif is_household:
         structured["category"] = "household"
 
     return structured
@@ -861,9 +1342,11 @@ def parse_corrections(transcript: str) -> list[dict]:
 
 def _build_visit_entity(visit_idx: int, structured: dict, original_transcript: str = "", household_id: str | None = None) -> dict:
     """Structure a raw extraction dictionary into clean clinical sections."""
-    name = structured.get("beneficiary_name") or f"Beneficiary-{visit_idx + 1}"
+    # No placeholder names: an unidentified visit stays unidentified so the
+    # worker is asked rather than a wrong beneficiary being reused.
+    name = structured.get("beneficiary_name") or None
     cat = structured.get("category") or "general"
-    
+
     personal_details = {
         "name": name,
         "age": structured.get("age"),
@@ -953,7 +1436,7 @@ def _build_visit_entity(visit_idx: int, structured: dict, original_transcript: s
     if structured.get("follow_up_date"):
         follow_ups.append({"type": "specific_date", "date": structured["follow_up_date"]})
 
-    return {
+    visit = {
         "visit_id": f"visit-{visit_idx + 1}",
         "beneficiary_name": name,
         "beneficiary_id": None,
@@ -968,10 +1451,11 @@ def _build_visit_entity(visit_idx: int, structured: dict, original_transcript: s
         "immunisation": {k: v for k, v in immunisation.items() if v is not None},
         "elderly_health": {k: v for k, v in elderly_health.items() if v is not None},
         "household_obs": household_obs,
-        "observations": [f"Recorded in field visit: {name}"],
+        "observations": ([f"Recorded in field visit: {name}"] if name else []),
         "follow_ups": follow_ups,
         "raw_structured": structured,
     }
+    return _normalize_visit_names(visit)
 
 
 def extract_fields_multi(transcript: str, language: str = "en") -> tuple[dict, str]:
@@ -988,7 +1472,7 @@ def extract_fields_multi(transcript: str, language: str = "en") -> tuple[dict, s
     corrections = parse_corrections(text)
     mode = "demo"
 
-    if language.lower().split("-")[0] == "kn":
+    if _is_kannada_script_path(language, text):
         structured = _extract_kannada(text)
         visit = _build_visit_entity(0, structured, original_transcript=text)
         if not structured.get("beneficiary_name"):
@@ -1017,173 +1501,189 @@ def extract_fields_multi(transcript: str, language: str = "en") -> tuple[dict, s
             "corrections": corrections,
         }, mode
 
-    # Check for Scenario B: Household with multiple family members
+    # ------------------------------------------------------------------
+    # Unified segmentation.
+    #
+    # Every remaining scenario (one beneficiary, several members of one
+    # household, several beneficiaries across households) goes through the
+    # same segmentation engine, so a beneficiary boundary is detected the
+    # same way no matter which module the visit belongs to.
+    # ------------------------------------------------------------------
+    from app.services import segmentation as _seg
+
+    segments = _seg.segment_transcript(text, language)
+
+    # Household context: a spoken household reference binds the members of
+    # that household, but never merges their observations.
     m_hh = HOUSEHOLD_PATTERN.search(text)
-    is_household_family = bool(m_hh) or bool(re.search(r"\b(?:Lakshmi's\s+household|household\s+of|her\s+husband|their\s+daughter|their\s+son)\b", text, re.I))
+    household_label: str | None = None
+    if m_hh:
+        hh_name = (m_hh.group(1) or m_hh.group(2) or m_hh.group(3) or "").strip()
+        if hh_name:
+            household_label = f"{hh_name}'s household"
+    elif re.search(
+        r"\b(?:her\s+husband|his\s+wife|their\s+daughter|their\s+son|her\s+mother|his\s+father)\b",
+        text,
+        re.I,
+    ):
+        household_label = "Family"
 
-    if is_household_family:
-        hh_name = (m_hh.group(1) or m_hh.group(2) or m_hh.group(3) or "Household") if m_hh else "Family"
-        hh_label = f"{hh_name}'s household"
-        
-        # Extract general household hygiene observations
-        hh_struct = _extract_demo(text)
-        hh_obs = {
-            k: hh_struct[k] for k in (
-                "water_source", "water_storage_covered", "toilet_available", "toilet_usage",
-                "waste_disposal", "drainage", "stagnant_water", "handwashing", "awareness_provided", "follow_up_days"
-            ) if k in hh_struct
-        }
-        
-        visits = []
-        member_refs = []
+    visits: list[dict] = []
+    member_refs: list[dict] = []
+    household_observations: dict = {}
 
-        # Find member mentions:
-        # e.g. "Lakshmi is 28 weeks pregnant and weighs 53 kg"
-        # "Her husband Ravi is 30 years old"
-        # "Their daughter Anu is two years old and weighs 11 kg"
-        
-        # 1. Primary woman/head if pregnant
-        m_preg = re.search(r"\b([A-Z][a-zA-Z]+)\s+is\s+(\d{1,2})\s*weeks?\s+pregnant(?:.*?weighs?\s+(\d+(?:\.\d+)?)\s*k(?:g|ilograms?))?", text, re.I)
-        if m_preg:
-            p_name = m_preg.group(1).strip()
-            if p_name.lower() in ("she", "her", "the", "this", "patient", "woman"):
-                m_vis = re.search(r"\b(?:visited|saw|met|went to)\s+([A-Z][a-zA-Z]+)(?:'s\s+household)?", text, re.I)
-                if m_vis:
-                    p_name = m_vis.group(1).strip()
-                elif m_hh and (m_hh.group(1) or m_hh.group(2) or m_hh.group(3)):
-                    p_name = (m_hh.group(1) or m_hh.group(2) or m_hh.group(3)).strip()
-            weeks = int(m_preg.group(2))
-            weight = float(m_preg.group(3)) if m_preg.group(3) else None
-            p_struct = {
-                "beneficiary_name": p_name,
-                "weeks_pregnant": weeks,
-                "weight_kg": weight,
-                "category": "pregnancy",
-                "relation": "self",
-                "gender": "female",
-                "household_id": hh_label,
-            }
-            if "bp_sys" in hh_struct:
-                p_struct["bp_sys"] = hh_struct["bp_sys"]
-                p_struct["bp_dia"] = hh_struct["bp_dia"]
-            visits.append(_build_visit_entity(len(visits), p_struct, household_id=hh_label))
-            member_refs.append({"name": p_name, "relation": "head/self", "gender": "female", "category": "pregnancy"})
+    for seg in segments:
+        # Gemini-powered extraction when configured, with deterministic fallback per segment.
+        parsed, seg_mode = extract_fields(seg.text, language)
+        if seg_mode == "live":
+            mode = "live"
+        spoken_name = seg.spoke_name or parsed.get("beneficiary_name")
+        if spoken_name:
+            parsed["beneficiary_name"] = spoken_name
+        else:
+            parsed.pop("beneficiary_name", None)
 
-        # 2. Husband/Spouse
-        m_husb = re.search(r"\b(?:her\s+husband|husband)\s+([A-Z][a-zA-Z]+)(?:\s+is\s+(\d{1,3})\s*years?\s*old)?", text, re.I)
-        if m_husb:
-            h_name = m_husb.group(1).strip()
-            h_age = int(m_husb.group(2)) if m_husb.group(2) else 30
-            h_struct = {
-                "beneficiary_name": h_name,
-                "age": h_age,
-                "gender": "male",
-                "relation": "husband",
-                "category": "general",
-                "household_id": hh_label,
-            }
-            visits.append(_build_visit_entity(len(visits), h_struct, household_id=hh_label))
-            member_refs.append({"name": h_name, "relation": "husband", "age": h_age, "gender": "male"})
+        # A household observation belongs to the household, not to one member,
+        # so it is collected once across the whole recording.
+        for key in (
+            "water_source", "water_storage_covered", "toilet_available", "toilet_usage",
+            "waste_disposal", "drainage", "stagnant_water", "handwashing",
+            "awareness_provided", "follow_up_days",
+        ):
+            if key in parsed and key not in household_observations:
+                household_observations[key] = parsed[key]
 
-        # 3. Daughter / Son / Child
-        m_child = re.search(r"\b(?:their|her|his)?\s*(daughter|son|child)\s+([A-Z][a-zA-Z]+)(?:\s+is\s+(\d{1,2}|two|three|one)\s*years?\s*old)?(?:.*?weighs?\s+(\d+(?:\.\d+)?)\s*k(?:g|ilograms?))?", text, re.I)
-        if m_child:
-            rel = m_child.group(1).lower()
-            c_name = m_child.group(2).strip()
-            raw_age = m_child.group(3)
-            age_map = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
-            c_age = age_map.get(str(raw_age).lower(), int(raw_age) if raw_age and raw_age.isdigit() else 2)
-            c_wt = float(m_child.group(4)) if m_child.group(4) else 11.0
-            c_gender = "female" if rel == "daughter" else ("male" if rel == "son" else "")
-            c_struct = {
-                "beneficiary_name": c_name,
-                "age": c_age,
-                "gender": c_gender,
-                "weight_kg": c_wt,
-                "relation": rel,
-                "category": "child",
-                "household_id": hh_label,
-            }
-            visits.append(_build_visit_entity(len(visits), c_struct, household_id=hh_label))
-            member_refs.append({"name": c_name, "relation": rel, "age": c_age, "gender": c_gender, "weight_kg": c_wt})
+        hh_for_visit = household_label or parsed.get("household_id")
+        if hh_for_visit:
+            parsed["household_id"] = hh_for_visit
 
-        household_visit = {
-            "household_id": hh_label,
-            "household_observations": hh_obs,
+        # Category inference from the content of THIS segment only.
+        parsed["category"] = _infer_visit_category(parsed, seg.text)
+
+        visit = _build_visit_entity(
+            len(visits), parsed, original_transcript=seg.text, household_id=hh_for_visit
+        )
+        visit["boundary_reason"] = seg.boundary_reason
+        visit["segment_index"] = seg.index
+        visits.append(visit)
+
+        if spoken_name:
+            member_refs.append({
+                "name": spoken_name,
+                "relation": parsed.get("relation") or "",
+                "age": parsed.get("age"),
+                "gender": parsed.get("gender") or "",
+                "weight_kg": parsed.get("weight_kg"),
+                "category": parsed.get("category"),
+                "household_id": hh_for_visit,
+            })
+
+    household_visits: list[dict] = []
+    if household_observations:
+        household_visits.append({
+            "household_id": household_label or next(
+                (v.get("household_id") for v in visits if v.get("household_id")), None
+            ),
+            "household_observations": household_observations,
             "member_references": member_refs,
-        }
-
-        return {
-            "session_id": session_id,
-            "scenario": "household_members",
-            "visits": visits,
-            "household_visits": [household_visit],
-            "community_activities": [],
-            "corrections": corrections,
-        }, mode
-
-    # Check for Scenario C: Multiple beneficiaries across households
-    # Split text at visit boundary keywords
-    boundary_matches = list(VISIT_BOUNDARY.finditer(text))
-    if len(boundary_matches) > 0:
-        segments = []
-        last_idx = 0
-        for m in boundary_matches:
-            seg = text[last_idx:m.start()].strip()
-            if seg:
-                segments.append(seg)
-            last_idx = m.start()
-        trailing = text[last_idx:].strip()
-        if trailing:
-            segments.append(trailing)
-
-        visits = []
-        for idx, seg in enumerate(segments):
-            parsed = _extract_demo(seg)
-            # If the segment says "visited Ravi, who is 65 years old and needs a blood pressure follow-up"
-            if not parsed.get("beneficiary_name"):
-                m_name = re.search(r"\b(?:visited|went\s+to|patient\s+was)\s+([A-Z][a-zA-Z]+)", seg, re.I)
-                if m_name:
-                    parsed["beneficiary_name"] = m_name.group(1).strip()
-            # If still no name, generate placeholder
-            if not parsed.get("beneficiary_name"):
-                parsed["beneficiary_name"] = f"Beneficiary-{idx + 1}"
-            visits.append(_build_visit_entity(idx, parsed, original_transcript=seg))
-
-        return {
-            "session_id": session_id,
-            "scenario": "multiple_beneficiaries",
-            "visits": visits,
-            "household_visits": [],
-            "community_activities": [],
-            "corrections": corrections,
-        }, mode
-
-    # Scenario A: Single beneficiary visit
-    single_struct = _extract_demo(text)
-    visit = _build_visit_entity(0, single_struct, original_transcript=text)
-    
-    hh_visits = []
-    if any(k in single_struct for k in ("water_source", "toilet_available", "waste_disposal", "stagnant_water")):
-        hh_visits.append({
-            "household_id": single_struct.get("household_id") or "Household",
-            "household_observations": {
-                k: single_struct[k] for k in (
-                    "water_source", "water_storage_covered", "toilet_available", "toilet_usage",
-                    "waste_disposal", "drainage", "stagnant_water", "handwashing", "awareness_provided", "follow_up_days"
-                ) if k in single_struct
-            },
-            "member_references": [{"name": single_struct.get("beneficiary_name", "Beneficiary")}],
         })
+
+    if len(visits) > 1:
+        scenario = "household_members" if household_label else "multiple_beneficiaries"
+    else:
+        scenario = "single_beneficiary"
 
     return {
         "session_id": session_id,
-        "scenario": "single_beneficiary",
-        "visits": [visit],
-        "household_visits": hh_visits,
+        "scenario": scenario,
+        "visits": visits,
+        "household_visits": household_visits,
         "community_activities": [],
         "corrections": corrections,
     }, mode
+
+
+def _infer_visit_category(structured: dict, segment_text: str) -> str:
+    """Infer the health category of ONE segment from its own content."""
+    if structured.get("category"):
+        return str(structured["category"]).lower()
+    if structured.get("weeks_pregnant") is not None:
+        return "pregnancy"
+    if structured.get("vaccine_name") or structured.get("dose_number"):
+        return "immunisation"
+    if structured.get("fetal_heart") or structured.get("hemoglobin"):
+        return "pregnancy"
+    if structured.get("feeding") is not None or structured.get("jaundice") is not None:
+        return "newborn"
+    if structured.get("temperature") is not None:
+        return "newborn"
+    age = structured.get("age")
+    if isinstance(age, int):
+        if age <= 2:
+            return "newborn"
+        if age <= 12:
+            return "child"
+        if age >= 60:
+            return "elderly"
+    if structured.get("bp_sys") is not None or structured.get("bp_dia") is not None:
+        return "elderly"
+    if structured.get("weight_kg") is not None or structured.get("height_cm") is not None:
+        return "nutrition"
+    return "general"
+
+
+# =====================================================================
+# 4) Tara conversational assistance (Gemini LLM)
+# =====================================================================
+
+def generate_tara_response(
+    message: str,
+    *,
+    language: str = "en",
+    context: dict[str, Any] | None = None,
+) -> str:
+    """Generate a Tara AI response for conversational assistance.
+
+    Uses Google Gemini when configured. Raises GeminiLLMError for missing/invalid
+    configuration, unsupported model, quota/rate/network/timeout issues, or
+    malformed/empty responses. Never returns a fabricated successful response.
+    """
+    message = (message or "").strip()
+    if not message:
+        raise GeminiLLMError("invalid_request", "A message is required.")
+    if not _llm_live_enabled():
+        # Distinguish missing config cases for clearer handling upstream.
+        if not _gemini_api_key():
+            raise GeminiLLMError("missing_api_key", "Gemini API key is not configured.")
+        if not _gemini_model():
+            raise GeminiLLMError("missing_model", "Gemini model is not configured.")
+        raise GeminiLLMError("provider_error", "Gemini is not configured.")
+
+    ctx = context or {}
+    # Keep context minimal and safe; do not include secrets.
+    safe_ctx = {
+        k: ctx.get(k)
+        for k in ("app", "topic", "beneficiary_summary", "visit_summary", "transcript", "language")
+        if k in ctx and ctx.get(k) not in (None, "", {}, [])
+    }
+    prompt = (
+        "You are Tara, the AI health companion for ASHA workers in the ASHA Swar Nirantar app. "
+        "Provide concise, context-aware, practical assistance for ASHA field workflows "
+        "(conversation, visit documentation guidance, follow-up summarization/identification, clarification when information is missing or ambiguous, and navigation/help within the app). "
+        "You may understand and respond for Kannada, English, Kannada-English code-mix, and other supported languages; prefer the user's language when clear. "
+        "Safety rules: do not diagnose, do not prescribe, do not invent symptoms/dates/measurements/beneficiary details, preserve any reported danger signs accurately, "
+        "recommend escalation according to approved local protocols/emergency care for danger signs, and remind that ASHA worker confirmation is required before saving health records. "
+        "If details are missing or ambiguous (including beneficiary identity), ask for clarification clearly. "
+        "Keep responses brief and helpful.\n\n"
+        f"Language hint: {language}\n"
+        f"Context (may be partial): {json.dumps(safe_ctx, ensure_ascii=False, default=str)}\n\n"
+        f"ASHA worker message: {message}"
+    )
+    text = _gemini_generate_text(prompt)
+    text = (text or "").strip()
+    if not text:
+        raise GeminiLLMError("empty_response", "Gemini returned an empty response.")
+    return text
 
 
 # =====================================================================
@@ -1191,14 +1691,11 @@ def extract_fields_multi(transcript: str, language: str = "en") -> tuple[dict, s
 # =====================================================================
 
 def text_to_speech(text: str, language: str = "en") -> dict:
-    """Return {"mode": "live", "audio_base64": ...} or {"mode": "demo"}.
-
-    LIVE PATH: calls the Gnani Timbre v3.0 HTTP endpoint and returns the
-    base64-encoded audio. In demo mode no audio is produced — the
-    frontend uses browser speech synthesis as the labelled demo fallback.
+    """Return TTS result. Live mode returns base64 audio when Gnani Timbre is configured and responds.
+    Demo/fallback mode returns no audio so frontend can use browser speech synthesis.
     """
     if not _tts_live_enabled():
-        return {"mode": "demo"}
+        return {"mode": "demo", "provider": "browser", "mime_type": None}
 
     try:
         payload = json.dumps({"text": text, "language": language}).encode("utf-8")
@@ -1212,19 +1709,19 @@ def text_to_speech(text: str, language: str = "en") -> dict:
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
-            content_type = resp.headers.get("Content-Type", "")
+            content_type = (resp.headers.get("Content-Type", "") or "").lower()
             body = resp.read()
         if "application/json" in content_type:
             data = json.loads(body.decode("utf-8"))
             audio = data.get("audio_base64") or data.get("audio") or ""
+            mime_type = data.get("mime_type") or data.get("content_type") or "audio/wav"
             if audio:
-                return {"mode": "live", "audio_base64": audio}
-            # Some providers return raw base64 inside a wrapper.
+                return {"mode": "live", "audio_base64": audio, "provider": "Gnani Timbre", "mime_type": mime_type}
             if data.get("base64"):
-                return {"mode": "live", "audio_base64": data["base64"]}
-            return {"mode": "demo"}
-        # Binary audio response (e.g. audio/wav, audio/mpeg).
-        return {"mode": "live", "audio_base64": base64.b64encode(body).decode("ascii")}
-    except Exception:
-        # Live call failed — fall back honestly.
-        return {"mode": "demo"}
+                return {"mode": "live", "audio_base64": data["base64"], "provider": "Gnani Timbre", "mime_type": mime_type}
+            return {"mode": "demo", "provider": "browser", "mime_type": None}
+        mime_type = content_type.split(";")[0].strip() if content_type else "audio/wav"
+        return {"mode": "live", "audio_base64": base64.b64encode(body).decode("ascii"), "provider": "Gnani Timbre", "mime_type": mime_type}
+    except Exception as exc:
+        logger.warning("Timbre TTS failed; falling back to browser synthesis: %s", exc.__class__.__name__)
+        return {"mode": "demo", "provider": "browser", "mime_type": None}

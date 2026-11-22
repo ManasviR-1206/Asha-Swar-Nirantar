@@ -11,9 +11,7 @@ import {
   Brain,
   Save,
   LogOut,
-  RefreshCw,
   ListChecks,
-  Sparkles,
 } from "lucide-react";
 import { LANGUAGES } from "../../lib/api.js";
 import { useAuth } from "../../lib/auth.jsx";
@@ -115,13 +113,13 @@ export default function Settings() {
         <p className="mt-3 text-xs font-medium leading-relaxed text-teal-deep/55">
           {live
             ? t("settings.liveDesc", "Connected to the live backend — real speech services, storage and SMS gateway.")
-            : t("settings.demoDesc", "Running fully offline-safe demo services. Nothing pretends to be live: every demo screen is labelled, and simulated SMS never sends a real message.")}
+            : t("settings.demoDesc", "Running fully offline-safe demo services. Service status is shown below; simulated SMS never sends a real message.")}
         </p>
         <div className="mt-4 space-y-2">
           {[
             { name: t("settings.svcStt", "Speech-to-text · Gnani Prisma"), live },
             { name: t("settings.svcTts", "Text-to-speech · Gnani Timbre"), live },
-            { name: t("settings.svcLlm", "LLM field extraction"), live },
+            { name: t("settings.svcLlm", "Tara AI (LLM) · Google Gemini"), live },
             { name: t("settings.svcDb", "Records database"), live },
             { name: t("settings.svcSms", "SMS gateway"), live: false, note: t("settings.svcSmsNote", "simulated in demo") },
           ].map((s) => (
@@ -175,12 +173,12 @@ export default function Settings() {
         initial={{ opacity: 0, y: 14 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, delay: 0.18 }}
-        className="card-ivory bg-gradient-to-br from-teal-deep to-midnight p-6 text-white"
+        className="rounded-3xl bg-gradient-to-br from-[#321321] to-[#7A1638] p-6 text-white shadow-card border border-[#E8A8B8]/20"
       >
-        <h3 className="flex items-center gap-2.5 text-sm font-extrabold text-white">
-          <Heart size={16} className="text-mint" strokeWidth={2.4} /> {t("settings.aboutApp", "About ASHA Swar Nirantar")}
+        <h3 className="flex items-center gap-2.5 text-sm font-extrabold text-[#FFF7F0]">
+          <Heart size={16} className="text-[#E8A8B8]" strokeWidth={2.4} /> {t("settings.aboutApp", "About ASHA Swar Nirantar")}
         </h3>
-        <p className="mt-1 text-[0.68rem] font-bold uppercase tracking-wider text-mint/80">
+        <p className="mt-1 text-[0.68rem] font-bold uppercase tracking-wider text-[#E8A8B8]/90">
           {t("settings.version", "Version 1.0.0")}
         </p>
         <div className="mt-4 grid gap-3 sm:grid-cols-3">
@@ -189,19 +187,19 @@ export default function Settings() {
             { icon: Brain, word: t("app.remember"), text: t("settings.p2", "Every visit becomes a permanent, readable pulse thread.") },
             { icon: Save, word: t("app.protect"), text: t("settings.p3", "Danger signs are flagged for review, mothers reach care sooner.") },
           ].map((p) => (
-            <div key={p.word} className="rounded-2xl bg-white/5 p-4">
-              <p.icon size={16} className="text-mint" strokeWidth={2.4} />
-              <p className="mt-2 text-xs font-extrabold tracking-[0.18em] text-mint">{p.word}</p>
-              <p className="mt-1 text-[0.7rem] font-medium leading-relaxed text-white/60">{p.text}</p>
+            <div key={p.word} className="rounded-2xl bg-white/10 border border-[#E8A8B8]/15 p-4">
+              <p.icon size={16} className="text-[#E8A8B8]" strokeWidth={2.4} />
+              <p className="mt-2 text-xs font-extrabold tracking-[0.18em] text-[#F4DCE4]">{p.word}</p>
+              <p className="mt-1 text-[0.7rem] font-medium leading-relaxed text-[#FFF7F0]/80">{p.text}</p>
             </div>
           ))}
         </div>
-        <p className="mt-4 text-xs font-semibold leading-relaxed text-white/70">
+        <p className="mt-4 text-xs font-semibold leading-relaxed text-[#FFF7F0]/80">
           {t("settings.aboutDesc", "The voice-first field register for ASHA workers — because every village deserves a pulse that never fades.")}
         </p>
       </motion.section>
 
-      {/* ------------------------------ demo data + logout ------------------------------ */}
+      {/* ------------------------------ account ------------------------------ */}
       <motion.section
         initial={{ opacity: 0, y: 14 }}
         animate={{ opacity: 1, y: 0 }}
@@ -209,25 +207,17 @@ export default function Settings() {
         className="card-ivory p-6"
       >
         <h3 className="flex items-center gap-2.5 text-sm font-extrabold text-teal-deep">
-          <RefreshCw size={16} className="text-mint" strokeWidth={2.4} /> {t("common.demoMode")} {t("settings.data", "data")}
+          <User size={16} className="text-mint" strokeWidth={2.4} /> {t("nav.account", "Account")}
         </h3>
-        <p className="mt-2 text-xs font-medium leading-relaxed text-teal-deep/55">
-          {t("settings.demoReset", "To reset the demo dataset (beneficiaries, visits, alerts, reminders), run the backend seeder script from the project root — it recreates a clean set of demo records.")}
-        </p>
-        <div className="mt-5 flex flex-col gap-2.5 sm:flex-row">
-          <button
-            onClick={() => {
-              logout();
-              navigate("/");
-            }}
-            className="flex flex-1 items-center justify-center gap-2 rounded-full bg-coral px-5 py-3 text-sm font-extrabold text-white transition-transform hover:-translate-y-0.5"
-          >
-            <LogOut size={16} strokeWidth={2.4} /> {t("nav.logout")}
-          </button>
-          <div className="flex flex-1 items-center justify-center gap-2 rounded-full bg-teal-deep/5 px-5 py-3 text-xs font-semibold text-teal-deep/45">
-            <Sparkles size={14} /> {t("settings.demoResetNote", "Demo data is reset via the backend seeder")}
-          </div>
-        </div>
+        <button
+          onClick={() => {
+            logout();
+            navigate("/");
+          }}
+          className="mt-5 flex w-full items-center justify-center gap-2 rounded-full bg-coral px-5 py-3 text-sm font-extrabold text-white transition-transform hover:-translate-y-0.5 sm:w-auto sm:min-w-64"
+        >
+          <LogOut size={16} strokeWidth={2.4} /> {t("nav.logout")}
+        </button>
       </motion.section>
     </div>
   );

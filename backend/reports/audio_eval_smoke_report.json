@@ -1,0 +1,104 @@
+{
+  "generated_at": "2026-11-21T20:15:26.703868+00:00",
+  "manifest": "C:\\Users\\Manasvi R\\OneDrive\\Desktop\\Asha Swar Nirantar\\backend\\reports\\audio_eval_manifest.template.json",
+  "stt_mode": "skip",
+  "notes": [
+    "This report contains only actual run results. No fabricated WER/CER/STT claims.",
+    "Acoustic STT and structured extraction are evaluated separately.",
+    "Do not mark Karnataka accent/Kanglish acoustic recognition complete until real audio tests pass."
+  ],
+  "summary": {
+    "total_items": 2,
+    "stt_ok": 0,
+    "stt_skipped": 2,
+    "stt_errors": 0,
+    "avg_wer": null,
+    "avg_cer": null,
+    "avg_field_accuracy_on_hypothesis": null
+  },
+  "items": [
+    {
+      "index": 0,
+      "audio_path": "C:\\Users\\Manasvi R\\OneDrive\\Desktop\\Asha Swar Nirantar\\backend\\reports\\samples\\kanglish_01.wav",
+      "audio_exists": false,
+      "speaker_id": "anon_consenting_01",
+      "speaker_consent": true,
+      "language_hint": "kn-IN,en-IN",
+      "accent": "karnataka_kannada",
+      "script": "latin",
+      "code_mix": "kanglish",
+      "noise": "quiet",
+      "speed": "natural",
+      "mid_sentence_switch": true,
+      "reference_transcript": "Meena ge four months pregnancy ide.",
+      "hypothesis_transcript": "",
+      "stt": {
+        "status": "skipped",
+        "reason": "stt_mode_skip"
+      },
+      "stt_metrics": null,
+      "extraction": {
+        "extraction_mode": "demo",
+        "predicted_structured": {
+          "visit_date": "2026-11-22",
+          "beneficiary_name": "Meena",
+          "category": "pregnancy"
+        },
+        "field_results": {
+          "beneficiary_name": {
+            "expected": "Meena",
+            "predicted": "Meena",
+            "match": true
+          },
+          "weeks_pregnant": {
+            "expected": 16,
+            "predicted": null,
+            "match": false
+          }
+        },
+        "fields_correct": 1,
+        "fields_total": 2,
+        "field_accuracy": 0.5,
+        "note": "extraction_run_on_reference_transcript_no_stt_hypothesis"
+      }
+    },
+    {
+      "index": 1,
+      "audio_path": "C:\\Users\\Manasvi R\\OneDrive\\Desktop\\Asha Swar Nirantar\\backend\\reports\\samples\\kannada_english_medical_02.wav",
+      "audio_exists": false,
+      "speaker_id": "anon_consenting_02",
+      "speaker_consent": true,
+      "language_hint": "kn-IN,en-IN",
+      "accent": "karnataka_kannada",
+      "script": "latin",
+      "code_mix": "kanglish",
+      "noise": "quiet",
+      "speed": "natural",
+      "mid_sentence_switch": true,
+      "reference_transcript": "Avrige Hb nine point five ide.",
+      "hypothesis_transcript": "",
+      "stt": {
+        "status": "skipped",
+        "reason": "stt_mode_skip"
+      },
+      "stt_metrics": null,
+      "extraction": {
+        "extraction_mode": "demo",
+        "predicted_structured": {
+          "visit_date": "2026-11-22"
+        },
+        "field_results": {
+          "hemoglobin": {
+            "expected": 9.5,
+            "predicted": null,
+            "match": false
+          }
+        },
+        "fields_correct": 0,
+        "fields_total": 1,
+        "field_accuracy": 0.0,
+        "note": "extraction_run_on_reference_transcript_no_stt_hypothesis"
+      }
+    }
+  ]
+}

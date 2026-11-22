@@ -562,7 +562,13 @@ export function createVoiceSession({
     if (preferBrowser) return startBrowserRecognition();
 
     // Determine the real STT provider before requesting microphone access.
-    const url = socketUrl || buildSocketUrl(language);
+    let wsToken = "";
+    try {
+      wsToken = await fetchVoiceWsToken();
+    } catch (err) {
+      throw err instanceof VoiceError ? err : new VoiceError(VoiceErrorKind.SOCKET_FAILED, "Could not authenticate the voice session.", err);
+    }
+    const url = socketUrl || buildSocketUrl(language, undefined, wsToken);
     await new Promise((resolve, reject) => {
       let wsRef;
       try {
@@ -801,19 +807,39 @@ export function createVoiceSession({
   };
 }
 
+async function fetchVoiceWsToken() {
+  const apiBase = import.meta.env?.VITE_API_BASE || "/api";
+  const saved = JSON.parse(localStorage.getItem("asn_auth") || "{}");
+  const headers = { "Content-Type": "application/json" };
+  if (saved.token) headers.Authorization = `Bearer ${saved.token}`;
+  const res = await fetch(`${apiBase.replace(/\/$/, "")}/voice/ws-token`, {
+    method: "POST",
+    headers,
+  });
+  if (!res.ok) throw new VoiceError(VoiceErrorKind.SOCKET_FAILED, "Could not authenticate the voice session.");
+  const data = await res.json().catch(() => ({}));
+  if (!data?.token) throw new VoiceError(VoiceErrorKind.SOCKET_FAILED, "Could not authenticate the voice session.");
+  return data.token;
+}
+
 /** Builds the voice WebSocket URL, honouring VITE_API_BASE when absolute. */
-export function buildSocketUrl(language = "en", base) {
+export function buildSocketUrl(language = "en", base, token = "") {
   const apiBase =
     base ?? (import.meta.env?.VITE_API_BASE || "/api");
+  const build = (urlObj) => {
+    urlObj.searchParams.set("language", language);
+    if (token) urlObj.searchParams.set("token", token);
+    return urlObj.toString();
+  };
   if (/^https?:\/\//i.test(apiBase)) {
     const url = new URL(apiBase.replace(/\/$/, "") + "/ws/voice");
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    url.searchParams.set("language", language);
-    return url.toString();
+    return build(url);
   }
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const path = `${apiBase.replace(/\/$/, "")}/ws/voice`;
-  return `${proto}//${window.location.host}${path}?language=${encodeURIComponent(language)}`;
+  const url = new URL(`${proto}//${window.location.host}${path}`);
+  return build(url);
 }
 
 /**

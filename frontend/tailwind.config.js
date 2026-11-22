@@ -4,39 +4,75 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Brand system — Hoosty-inspired purple/pink luxury
-        "bg-base": "#100C18",
-        plum: "#211329",
-        "dark-purple": "#28152D",
-        burgundy: "#38152E",
+        /* ------------------------------------------------------------------
+         * ASHA Swar Nirantar — premium burgundy, rose, ivory & white identity.
+         *
+         *   Deep Burgundy #321321   Burgundy      #7A1638   Wine Rose  #881144
+         *   Rose Pink     #C64F78   Dusty Rose    #B96F85   Blush Pink #E8A8B8
+         *   Pale Blush    #F4DCE4   Warm Ivory    #FFF7F0   Ivory Beige#F5E9E2
+         *   Pure White    #FFFFFF   Primary Text  #2B1F26   Secondary  #685B62
+         *   Border        #EADCE1   Success #367A59 Warning #A86B20 Error #B4233F
+         *
+         * Legacy token names are remapped for consistent adoption.
+         * ---------------------------------------------------------------- */
+        night: "#321321",
+        "bg-base": "#FFF7F0",
+        plum: "#F4DCE4",
+        "dark-purple": "#321321",
+        burgundy: {
+          DEFAULT: "#7A1638",
+          deep: "#321321",
+          wine: "#881144",
+        },
+        wine: "#881144",
+
         pink: {
-          DEFAULT: "#F078AD",
-          hot: "#E84D9B",
+          DEFAULT: "#C64F78", // Rose Pink (primary actions/highlights)
+          hot: "#C64F78",
+          blush: "#E8A8B8", // Blush Pink
+          soft: "#F4DCE4", // Pale Blush
         },
-        lavender: "#BBA6FF",
-        violet: "#8755D9",
-        pearl: "#FFF7FC",
-        ivory: "#FFF7FC",
-        coral: "#FF806F",
-        /* Legacy token names — remapped to the pink identity so all existing
-           dashboard/login/voice classes pick up the new theme automatically. */
+
+        rose: {
+          DEFAULT: "#C64F78",
+          dusty: "#B96F85",
+          wine: "#881144",
+          blush: "#E8A8B8",
+          pale: "#F4DCE4",
+        },
+
+        lavender: "#B96F85",
+        violet: "#7A1638",
+        pearl: "#FFFFFF",
+        ivory: "#FFF7F0",
+        beige: "#F5E9E2",
+
+        /* Semantic colours */
+        coral: "#B4233F", // error
+        success: "#367A59",
+        warning: "#A86B20",
+        info: "#7A1638",
+
+        /* Legacy tokens */
         teal: {
-          deep: "#100C18",
+          deep: "#321321", // deep burgundy for backgrounds/nav/buttons
         },
-        midnight: "#28152D",
+        midnight: "#321321",
         mint: {
-          DEFAULT: "#F078AD",
-          soft: "rgba(240,120,173,0.15)",
+          DEFAULT: "#C64F78", // primary accent
+          soft: "rgba(244,220,228,0.85)",
+          surface: "#F4DCE4",
         },
       },
       fontFamily: {
         sans: ["Figtree", "Inter", "system-ui", "sans-serif"],
       },
       boxShadow: {
-        glass: "0 8px 32px rgba(16,12,24,0.55)",
-        card: "0 4px 24px rgba(16,12,24,0.1)",
-        soft: "0 2px 12px rgba(16,12,24,0.07)",
-        pinkGlow: "0 0 24px rgba(240,120,173,0.35)",
+        glass: "0 8px 32px rgba(50,19,33,0.18)",
+        card: "0 6px 24px rgba(43,31,38,0.08)",
+        soft: "0 2px 12px rgba(43,31,38,0.06)",
+        pinkGlow: "0 0 24px rgba(198,79,120,0.28)",
+        blush: "0 10px 30px rgba(122,22,56,0.16)",
       },
       keyframes: {
         floaty: {

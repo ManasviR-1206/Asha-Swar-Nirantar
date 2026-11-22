@@ -35,11 +35,15 @@ import Tara from "./Tara.jsx";
  */
 
 const GRID = 26;
-const PINK = "#f078ad";
-const HOT = "#e84d9b";
-const LAV = "#bba6ff";
-const VIOLET = "#8755d9";
-const PEARL = "#fff7fc";
+/* Premium blush-pink healthcare palette (Phase 10). The holographic scene
+   keeps a dark, calm backdrop so the faces stay readable; the accent
+   colours come from the product palette rather than the old purple ramp. */
+const PINK = "#e8a8b8"; // Primary Blush Pink
+const HOT = "#b96f85"; // Dusty Rose
+const LAV = "#a8c8b5"; // Muted Sage
+const VIOLET = "#98566c"; // Deep Rose
+const PEARL = "#fff8f6"; // Warm Ivory
+const BACKDROP = "#2f3d44"; // Deep Slate, slightly cool against the rose
 
 /* Character placement (world units) */
 const WORKER_X = 0.85; // slightly right of centre
@@ -251,20 +255,20 @@ function GlassPanel({ w = 2, h = 2.5, glow = PINK }) {
       </RoundedBox>
       <RoundedBox args={[w, h, 0.055]} radius={0.06} smoothness={4}>
         <meshPhysicalMaterial
-          color="#2a1633"
+          color="#3a2b33"
           transparent
           opacity={0.58}
           roughness={0.16}
           metalness={0.3}
           clearcoat={0.85}
           clearcoatRoughness={0.2}
-          emissive="#38152e"
+          emissive="#5c3a48"
           emissiveIntensity={0.4}
         />
       </RoundedBox>
       <mesh position={[0, 0, 0.03]}>
         <planeGeometry args={[w - 0.1, h - 0.1]} />
-        <meshBasicMaterial color="#bba6ff" transparent opacity={0.05} toneMapped={false} />
+        <meshBasicMaterial color="#a8c8b5" transparent opacity={0.05} toneMapped={false} />
       </mesh>
     </group>
   );
@@ -329,7 +333,7 @@ function VoicePanel({ position, rotation, scale = 1 }) {
 
       {/* footer: REC timer + progress */}
       <group position={[0, -0.36, 0.045]}>
-        <Text fontSize={0.055} color="#c7b8c9" anchorX="left" anchorY="middle" position={[-0.66, 0, 0]}>
+        <Text fontSize={0.055} color="#c9d3d7" anchorX="left" anchorY="middle" position={[-0.66, 0, 0]}>
           REC 00:42
         </Text>
         <mesh position={[0.18, 0, 0]}>
@@ -395,7 +399,7 @@ function PulseThreadPanel({ position, rotation, scale = 1 }) {
         <meshBasicMaterial color={PEARL} toneMapped={false} />
       </mesh>
 
-      <Text fontSize={0.05} color="#c7b8c9" anchorX="center" anchorY="middle" position={[0, -0.62, 0.045]}>
+      <Text fontSize={0.05} color="#c9d3d7" anchorX="center" anchorY="middle" position={[0, -0.62, 0.045]}>
         Connected histories
       </Text>
     </group>
@@ -443,7 +447,7 @@ export default function HeroExperience({ replayKey = 0 }) {
       gl={{ antialias: true, alpha: true }}
       style={{ background: "transparent" }}
     >
-      <fog attach="fog" args={["#100C18", 10, 22]} />
+      <fog attach="fog" args={[BACKDROP, 10, 22]} />
       <CameraRig />
       <SceneContent />
       <EffectComposer multisampling={0}>

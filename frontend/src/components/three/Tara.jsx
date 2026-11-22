@@ -212,8 +212,8 @@ export default function Tara({
         <mesh ref={heart} position={[0, 0.08, 0.39]}>
           <sphereGeometry args={[0.075, 24, 24]} />
           <meshStandardMaterial
-            color="#ff8ab8"
-            emissive="#e84d9b"
+            color="#f0bccb"
+            emissive="#b96f85"
             emissiveIntensity={1.5}
             roughness={0.3}
           />
@@ -247,16 +247,16 @@ export default function Tara({
             <mesh ref={eyeL} position={[-0.17, 0, 0]}>
               <capsuleGeometry args={[0.045, 0.1, 6, 12]} />
               <meshStandardMaterial
-                color="#ffc4dd"
-                emissive="#f078ad"
+                color="#f6dce3"
+                emissive="#e8a8b8"
                 emissiveIntensity={2.4}
               />
             </mesh>
             <mesh ref={eyeR} position={[0.17, 0, 0]}>
               <capsuleGeometry args={[0.045, 0.1, 6, 12]} />
               <meshStandardMaterial
-                color="#d8ccff"
-                emissive="#bba6ff"
+                color="#c9ddd2"
+                emissive="#a8c8b5"
                 emissiveIntensity={2.4}
               />
             </mesh>
@@ -281,8 +281,8 @@ export default function Tara({
             <mesh ref={antenna} position={[0, 0.2, 0]}>
               <sphereGeometry args={[0.05, 16, 16]} />
               <meshStandardMaterial
-                color="#ffc4dd"
-                emissive="#e84d9b"
+                color="#f6dce3"
+                emissive="#b96f85"
                 emissiveIntensity={1.5}
               />
             </mesh>

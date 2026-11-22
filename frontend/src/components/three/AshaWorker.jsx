@@ -136,11 +136,11 @@ export default function AshaWorker({ position = [0, 0, 0], scale = 1 }) {
         {/* Lower catch-light in the iris keeps the eye from looking hollow */}
         <mesh position={[-0.056, 0.0125, 0.1525]}>
           <sphereGeometry args={[0.0026, 6, 6]} />
-          <meshBasicMaterial color="#bba6ff" toneMapped={false} />
+          <meshBasicMaterial color="#a8c8b5" toneMapped={false} />
         </mesh>
         <mesh position={[0.06, 0.0125, 0.1525]}>
           <sphereGeometry args={[0.0026, 6, 6]} />
-          <meshBasicMaterial color="#bba6ff" toneMapped={false} />
+          <meshBasicMaterial color="#a8c8b5" toneMapped={false} />
         </mesh>
 
         {/* Eyebrows */}
@@ -176,7 +176,7 @@ export default function AshaWorker({ position = [0, 0, 0], scale = 1 }) {
         </mesh>
         <mesh position={[0.045, 0.15, -0.15]}>
           <sphereGeometry args={[0.02, 10, 10]} />
-          <meshStandardMaterial color="#f078ad" roughness={0.4} />
+          <meshStandardMaterial color="#e8a8b8" roughness={0.4} />
         </mesh>
 
         {/* Earrings */}
@@ -227,7 +227,7 @@ export default function AshaWorker({ position = [0, 0, 0], scale = 1 }) {
       {/* Mint hem border → pink */}
       <mesh position={[0, 0.1, 0]} rotation={[Math.PI / 2, 0, 0]}>
         <torusGeometry args={[0.335, 0.014, 10, 40]} />
-        <meshStandardMaterial color="#f078ad" roughness={0.45} />
+        <meshStandardMaterial color="#e8a8b8" roughness={0.45} />
       </mesh>
       {/* Gold hem accent */}
       <mesh position={[0, 0.13, 0]} rotation={[Math.PI / 2, 0, 0]}>
@@ -250,29 +250,29 @@ export default function AshaWorker({ position = [0, 0, 0], scale = 1 }) {
       {/* Lanyard */}
       <mesh position={[0, 1.28, 0.16]} rotation={[0.25, 0, 0]}>
         <cylinderGeometry args={[0.004, 0.004, 0.16, 6]} />
-        <meshStandardMaterial color="#e84d9b" roughness={0.5} />
+        <meshStandardMaterial color="#b96f85" roughness={0.5} />
       </mesh>
       <group position={[0, 1.17, 0.2]} rotation={[0.12, 0, 0.03]}>
         <RoundedBox args={[0.115, 0.15, 0.012]} radius={0.015} smoothness={4}>
-          <meshStandardMaterial color="#fff7fc" roughness={0.4} />
+          <meshStandardMaterial color="#fff8f6" roughness={0.4} />
         </RoundedBox>
         {/* Card content stripes */}
         <mesh position={[0, 0.038, 0.008]}>
           <boxGeometry args={[0.08, 0.012, 0.002]} />
-          <meshStandardMaterial color="#e84d9b" emissive="#e84d9b" emissiveIntensity={0.25} />
+          <meshStandardMaterial color="#b96f85" emissive="#b96f85" emissiveIntensity={0.25} />
         </mesh>
         <mesh position={[0, 0.008, 0.008]}>
           <boxGeometry args={[0.085, 0.008, 0.002]} />
-          <meshStandardMaterial color="#28152d" opacity={0.55} transparent />
+          <meshStandardMaterial color="#3a2b33" opacity={0.55} transparent />
         </mesh>
         <mesh position={[0, -0.018, 0.008]}>
           <boxGeometry args={[0.085, 0.008, 0.002]} />
-          <meshStandardMaterial color="#28152d" opacity={0.55} transparent />
+          <meshStandardMaterial color="#3a2b33" opacity={0.55} transparent />
         </mesh>
         {/* ASHA text bar */}
         <mesh position={[0, -0.05, 0.008]}>
           <boxGeometry args={[0.06, 0.016, 0.002]} />
-          <meshStandardMaterial color="#bba6ff" opacity={0.9} transparent />
+          <meshStandardMaterial color="#a8c8b5" opacity={0.9} transparent />
         </mesh>
       </group>
 
@@ -297,7 +297,7 @@ export default function AshaWorker({ position = [0, 0, 0], scale = 1 }) {
               <planeGeometry args={[0.205, 0.285]} />
               <meshStandardMaterial
                 color="#2a1330"
-                emissive="#e84d9b"
+                emissive="#b96f85"
                 emissiveIntensity={0.45}
                 roughness={0.2}
               />
@@ -305,15 +305,15 @@ export default function AshaWorker({ position = [0, 0, 0], scale = 1 }) {
             {/* Screen data bars */}
             <mesh position={[-0.03, 0.04, 0.013]}>
               <boxGeometry args={[0.1, 0.012, 0.001]} />
-              <meshBasicMaterial color="#f078ad" />
+              <meshBasicMaterial color="#e8a8b8" />
             </mesh>
             <mesh position={[-0.035, 0.005, 0.013]}>
               <boxGeometry args={[0.08, 0.01, 0.001]} />
-              <meshBasicMaterial color="#bba6ff" />
+              <meshBasicMaterial color="#a8c8b5" />
             </mesh>
             <mesh position={[-0.025, -0.03, 0.013]}>
               <boxGeometry args={[0.12, 0.008, 0.001]} />
-              <meshBasicMaterial color="#f078ad" opacity={0.6} transparent />
+              <meshBasicMaterial color="#e8a8b8" opacity={0.6} transparent />
             </mesh>
           </group>
         </group>

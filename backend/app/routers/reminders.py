@@ -1,29 +1,22 @@
-"""SMS reminder endpoints: list, create, send (live/demo-honest), reschedule."""
-import json
-import urllib.request
+"""SMS reminder endpoints: list, create, send (live/demo-honest), reschedule.
+
+Reminder sends reuse the shared notification SMS service (TextBee/legacy/demo) so delivery,
+validation, consent checks, duplicate prevention, and history are consistent.
+"""
+from __future__ import annotations
+
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app import get_env
 from app.auth import get_current_worker
 from app.database import get_db
-from app.models import Beneficiary, SmsReminder
-from app.schemas import AckResponse, ReminderCreate, ReminderListResponse, ReminderOut
+from app.models import AshaWorker, Beneficiary, SmsReminder
+from app.schemas import ReminderCreate, ReminderListResponse, ReminderOut
+from app.services import notifications as notify
 
 router = APIRouter(prefix="/api/reminders", tags=["reminders"], dependencies=[Depends(get_current_worker)])
-
-_DEFAULT_MESSAGES = {
-    "anc": "Reminder: Your scheduled health visit is approaching. Please contact your ASHA worker.",
-    "vaccination": "Reminder: A community health visit is scheduled. Please coordinate with your local ASHA worker.",
-    "newborn": "Reminder: Your scheduled health visit is approaching. Please contact your ASHA worker.",
-    "nutrition": "Reminder: Your scheduled health visit is approaching. Please contact your ASHA worker.",
-    "community": "Reminder: A community health visit is scheduled. Please coordinate with your local ASHA worker.",
-    "household": "Reminder: Your scheduled health visit is approaching. Please contact your ASHA worker.",
-}
-# The SMS body is deliberately generic: no name, no category, no condition.
-_GENERIC_REMINDER = "Reminder: Your scheduled health visit is approaching. Please contact your ASHA worker."
 
 
 @router.get("", response_model=ReminderListResponse)
@@ -34,7 +27,11 @@ def list_reminders(db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=ReminderOut)
-def create_reminder(payload: ReminderCreate, db: Session = Depends(get_db)):
+def create_reminder(
+    payload: ReminderCreate,
+    db: Session = Depends(get_db),
+    worker: AshaWorker = Depends(get_current_worker),
+):
     b = db.query(Beneficiary).filter(Beneficiary.id == payload.beneficiary_id).first()
     if b is None:
         raise HTTPException(status_code=404, detail="Beneficiary not found")
@@ -42,7 +39,7 @@ def create_reminder(payload: ReminderCreate, db: Session = Depends(get_db)):
         beneficiary_id=b.id,
         type=payload.type,
         # Generic body only — the SMS never carries a name or any health detail.
-        message=_DEFAULT_MESSAGES.get(payload.type, _GENERIC_REMINDER),
+        message=notify.build_sms_body(payload.type, "en"),
         due_date=payload.due_date,
         status="scheduled",
         sms_status="pending",
@@ -55,49 +52,100 @@ def create_reminder(payload: ReminderCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/{reminder_id}/send")
-def send_reminder(reminder_id: int, db: Session = Depends(get_db)):
-    """Send an SMS via the configured provider.
+async def send_reminder(
+    reminder_id: int,
+    db: Session = Depends(get_db),
+    worker: AshaWorker = Depends(get_current_worker),
+):
+    """Send the reminder SMS via the configured provider (TextBee/legacy) or record a demo send.
 
-    LIVE: only if SMS_PROVIDER_URL + SMS_PROVIDER_KEY are set (an HTTP POST).
-    Otherwise the reminder is marked "demo_sent" and the response says, in
-    plain language, that no real SMS was sent.
+    Reuses the shared SMS notification service for validation, provider handling, and history.
     """
     reminder = db.query(SmsReminder).filter(SmsReminder.id == reminder_id).first()
     if reminder is None:
         raise HTTPException(status_code=404, detail="Reminder not found")
 
-    provider_url = get_env("SMS_PROVIDER_URL")
-    provider_key = get_env("SMS_PROVIDER_KEY")
-    if provider_url and provider_key:
-        try:
-            payload = json.dumps(
-                {
-                    "to": _beneficiary_phone(db, reminder.beneficiary_id) or "",
-                    "message": reminder.message,
-                }
-            ).encode("utf-8")
-            req = urllib.request.Request(
-                provider_url,
-                data=payload,
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {provider_key}"},
-                method="POST",
-            )
-            urllib.request.urlopen(req, timeout=15)
+    ben = db.query(Beneficiary).filter(Beneficiary.id == reminder.beneficiary_id).first()
+    if ben is None:
+        raise HTTPException(status_code=404, detail="Beneficiary not found")
+
+    if not getattr(reminder, "sms_consent", True):
+        raise HTTPException(status_code=400, detail="SMS consent is required before this reminder can be sent.")
+
+    # Record consent for this reminder send (explicit action by authorized worker).
+    consent = notify.record_consent(
+        db, ben, "sms", True, purpose="reminder_sms", worker_id=worker.id
+    )
+
+    body = (reminder.message or "").strip() or notify.build_sms_body(reminder.type, "en")
+    try:
+        result = await notify.send_sms_notification(
+            db,
+            beneficiary=ben,
+            follow_up_type=reminder.type,
+            language="en",
+            body=body,
+            worker_id=worker.id,
+            follow_up_id=reminder.follow_up_id,
+            consent=consent,
+            allow_duplicate=False,
+        )
+    except Exception:
+        reminder.sms_status = "failed"
+        db.commit()
+        raise HTTPException(status_code=500, detail="Could not process the SMS request. Please try again.")
+
+    # Keep SmsReminder state in sync with delivery outcome
+    if result.get("duplicate") and result.get("ok"):
+        # Existing non-failed notification already exists; reflect a sent/pending-compatible state.
+        dup_status = (result.get("status") or "").lower()
+        if dup_status == "demo":
+            reminder.sms_status = "demo_sent"
+            reminder.status = "sent"
+        elif dup_status in ("submitted", "sent", "delivered"):
             reminder.sms_status = "sent"
             reminder.status = "sent"
-            db.commit()
-            return {"status": "sent", "note": "Sent via configured SMS provider"}
-        except Exception as exc:
-            # Live send failed — do NOT pretend it was sent.
-            reminder.sms_status = "failed"
-            db.commit()
-            return {"status": "failed", "note": f"SMS provider error: {exc}"}
+        elif dup_status == "pending":
+            reminder.sms_status = "pending"
+        db.commit()
+        return {
+            "status": "demo_sent" if dup_status == "demo" else ("sent" if dup_status in ("submitted", "sent", "delivered") else "pending"),
+            "note": result.get("note") or "Duplicate SMS prevented (already sent or pending).",
+            "notification_id": result.get("id"),
+            "duplicate": True,
+        }
 
-    # No provider configured: mark it clearly as a simulated send.
-    reminder.sms_status = "demo_sent"
-    reminder.status = "sent"
+    if result.get("ok") and result.get("is_demo"):
+        reminder.sms_status = "demo_sent"
+        reminder.status = "sent"
+        db.commit()
+        return {
+            "status": "demo_sent",
+            "note": result.get("note") or notify.DEMO_LABEL,
+            "notification_id": result.get("id"),
+            "duplicate": False,
+        }
+
+    if result.get("ok"):
+        # Provider accepted/submitted the message (or explicitly delivered where reported)
+        reminder.sms_status = "sent"
+        reminder.status = "sent"
+        db.commit()
+        return {
+            "status": "sent",
+            "note": result.get("note") or "Submitted to the SMS provider.",
+            "notification_id": result.get("id"),
+            "duplicate": False,
+        }
+
+    reminder.sms_status = "failed"
     db.commit()
-    return {"status": "demo_sent", "note": "Demo mode: no real SMS sent"}
+    return {
+        "status": "failed",
+        "note": result.get("note") or "SMS delivery failed.",
+        "notification_id": result.get("id"),
+        "duplicate": False,
+    }
 
 
 @router.post("/{reminder_id}/reschedule", response_model=ReminderOut)
@@ -131,11 +179,6 @@ def _reminder_out(r: SmsReminder, name: str) -> dict:
         "sms_status": r.sms_status or r.status,
         "sms_consent": r.sms_consent,
     }
-
-
-def _beneficiary_phone(db: Session, beneficiary_id: int) -> str | None:
-    b = db.query(Beneficiary).filter(Beneficiary.id == beneficiary_id).first()
-    return b.phone if b else None
 
 
 def _beneficiary_name(db: Session, beneficiary_id: int) -> str:

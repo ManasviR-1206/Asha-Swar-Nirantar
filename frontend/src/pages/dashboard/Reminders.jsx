@@ -389,7 +389,7 @@ function ScheduleModal({ open, onClose, benList, preselect, onCreated }) {
                   type="checkbox"
                   checked={consent}
                   onChange={(e) => setConsent(e.target.checked)}
-                  className="mt-0.5 h-4 w-4 accent-[#39D6B0]"
+                  className="mt-0.5 h-4 w-4 accent-[#B96F85]"
                 />
                 <span className="text-xs font-semibold leading-relaxed text-teal-deep/75">
                   {t("reminders.consentText", "I confirm consent to send a non-sensitive reminder SMS")}

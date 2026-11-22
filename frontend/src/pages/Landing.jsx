@@ -19,8 +19,6 @@ import {
   Stethoscope,
   QrCode,
   MessageSquareText,
-  Syringe,
-  UserCheck,
   Languages,
 } from "lucide-react";
 import { useI18n } from "../lib/i18n.jsx";
@@ -41,8 +39,8 @@ function Orb({ size = 12 }) {
       style={{
         width: size,
         height: size,
-        background: "radial-gradient(circle at 35% 35%, #ffd3e6, #f078ad 55%, #8755d9)",
-        boxShadow: "0 0 12px rgba(240,120,173,0.85), 0 0 34px rgba(187,166,255,0.4)",
+        background: "radial-gradient(circle at 35% 35%, #f6dce3, #e8a8b8 55%, #98566c)",
+        boxShadow: "0 0 12px rgba(232,168,184,0.85), 0 0 34px rgba(168,200,181,0.4)",
       }}
     />
   );
@@ -67,38 +65,71 @@ function Nav() {
 
   return (
     <header
-      className={`fixed top-0 inset-x-0 z-50 transition-all duration-300 bg-[#100C18]/35 backdrop-blur-md border-b border-white/5 ${
-        scrolled ? "bg-[#100C18]/60 shadow-glass" : ""
+      className={`fixed top-0 inset-x-0 z-50 transition-all duration-300 backdrop-blur-md border-b ${
+        scrolled
+          ? "bg-white/85 border-blush/25 shadow-soft"
+          : "bg-[#2f3d44]/35 border-white/10"
       }`}
     >
       <nav className="max-w-7xl mx-auto flex items-center justify-between px-5 py-3.5">
         <a href="#home" className="flex items-center gap-2.5">
           <Orb size={13} />
           <div className="leading-tight">
-            <div className="font-extrabold tracking-wide text-[15px]">{t("app.name")}</div>
-            <div className="text-[10px] text-pink/80 tracking-[0.18em] uppercase">{t("app.tagline")}</div>
+            <div
+              className={`font-extrabold tracking-wide text-[15px] ${
+                scrolled ? "text-teal-deep" : "text-white"
+              }`}
+            >
+              {t("app.name")}
+            </div>
+            <div className="text-[10px] text-pink tracking-[0.18em] uppercase">
+              {t("app.tagline")}
+            </div>
           </div>
         </a>
-        <div className="hidden md:flex items-center gap-7 text-sm text-white/80">
+        <div
+          className={`hidden md:flex items-center gap-7 text-sm ${
+            scrolled ? "text-teal-deep/75" : "text-white/80"
+          }`}
+        >
           {links.map(([label, href]) => (
-            <a key={href} href={href} className="whitespace-nowrap hover:text-pink transition-colors">
+            <a
+              key={href}
+              href={href}
+              className="whitespace-nowrap hover:text-pink transition-colors"
+            >
               {label}
             </a>
           ))}
-          <LanguagePicker lang={lang} setLang={setLang} tone="dark" />
+          <LanguagePicker lang={lang} setLang={setLang} tone={scrolled ? "light" : "dark"} />
           <Link to="/login" className="btn-mint px-5 py-2 text-sm">
             {t("nav.login")}
           </Link>
         </div>
         <button
-          className="md:hidden text-white/90"
+          className={`md:hidden ${scrolled ? "text-teal-deep" : "text-white/90"}`}
           onClick={() => setOpen(!open)}
           aria-label={t("ld.toggleMenu", "Toggle menu")}
         >
           <div className="space-y-1.5">
-            <span className={`block w-6 h-0.5 bg-white transition ${open ? "rotate-45 translate-y-2" : ""}`} />
-            <span className={`block w-6 h-0.5 bg-white transition ${open ? "opacity-0" : ""}`} />
-            <span className={`block w-6 h-0.5 bg-white transition ${open ? "-rotate-45 -translate-y-2" : ""}`} />
+            <span
+              className={`block w-6 h-0.5 transition ${
+                scrolled ? "bg-teal-deep" : "bg-white",
+                open ? "rotate-45 translate-y-2" : ""
+              }`}
+            />
+            <span
+              className={`block w-6 h-0.5 transition ${
+                scrolled ? "bg-teal-deep" : "bg-white",
+                open ? "opacity-0" : ""
+              }`}
+            />
+            <span
+              className={`block w-6 h-0.5 transition ${
+                scrolled ? "bg-teal-deep" : "bg-white",
+                open ? "-rotate-45 -translate-y-2" : ""
+              }`}
+            />
           </div>
         </button>
       </nav>
@@ -161,38 +192,15 @@ function Hero() {
   const [ready, setReady] = useState(false);
   const { t } = useI18n();
 
-  /* floating HUD chips — 2D counterparts of the 3D holographic panels.
-     Positioned to never collide with the headline (left), Tara (right of
-     the worker) or the VOICE VISITS / PULSE THREAD panels. */
-  const chips = [
-    {
-      icon: Syringe,
-      tint: "#f078ad",
-      title: t("ld.chip.vaccination", "Upcoming vaccination"),
-      sub: t("ld.chip.vaccinationSub", "Ananya · 18 Nov"),
-      className: "hidden xl:flex left-[43%] top-[15%]",
-      delay: 0.1,
-    },
-    {
-      icon: UserCheck,
-      tint: "#bba6ff",
-      title: t("ld.chip.followup", "Follow-up recorded"),
-      sub: t("ld.chip.followupSub", "Lakshmi · ANC 28w"),
-      className: "hidden xl:flex right-[21%] top-[12%]",
-      delay: 0.25,
-    },
-    {
-      icon: Activity,
-      tint: "#ff806f",
-      title: t("ld.chip.drift", "Pulse Drift"),
-      sub: t("ld.chip.driftSub", "2 follow-ups due"),
-      className: "hidden lg:flex right-[3%] bottom-[23%]",
-      delay: 0.4,
-    },
-  ];
-
   return (
-    <section id="home" className="relative min-h-screen overflow-hidden">
+    <section
+      id="home"
+      className="relative min-h-screen overflow-hidden"
+      style={{
+        background:
+          "radial-gradient(120% 90% at 78% 18%, #4a5a5f 0%, #2f3d44 45%, #263238 100%)",
+      }}
+    >
       {/* full-bleed immersive 3D world */}
       <div className="absolute inset-0">
         <Suspense
@@ -216,47 +224,32 @@ function Hero() {
         </Suspense>
       </div>
 
-      {/* subtle left legibility scrim — keeps the headline readable while
-          letting the VOICE VISITS holographic panel glow through */}
+      {/* layered text-area overlay for contrast — keeps illustration visible on the right */}
       <div
-        className="absolute inset-y-0 left-0 w-[58%] pointer-events-none"
+        className="absolute inset-0 pointer-events-none"
+        aria-hidden
         style={{
           background:
-            "linear-gradient(90deg, rgba(16,12,24,0.72) 0%, rgba(16,12,24,0.38) 48%, rgba(16,12,24,0) 100%)",
+            "linear-gradient(90deg, rgba(15,10,20,0.82) 0%, rgba(30,12,28,0.58) 42%, rgba(30,12,28,0.12) 100%)",
+        }}
+      />
+      <div
+        className="absolute inset-y-0 left-0 w-[70%] pointer-events-none"
+        aria-hidden
+        style={{
+          background:
+            "radial-gradient(120% 100% at 0% 50%, rgba(50,19,33,0.35) 0%, rgba(50,19,33,0) 70%)",
         }}
       />
       {/* soft fade into the sections below */}
       <div
         className="absolute inset-x-0 bottom-0 h-28 pointer-events-none"
+        aria-hidden
         style={{
           background:
-            "linear-gradient(180deg, rgba(16,12,24,0) 0%, rgba(16,12,24,0.85) 100%)",
+            "linear-gradient(180deg, rgba(38,50,56,0) 0%, rgba(38,50,56,0.92) 78%, #fff8f6 100%)",
         }}
       />
-
-      {/* floating HUD chips (2D holographic counterparts) */}
-      {chips.map((chip) => (
-        <motion.div
-          key={chip.title}
-          initial={{ opacity: 0, y: 14 }}
-          animate={ready ? { opacity: 1, y: 0 } : {}}
-          transition={{ duration: 0.7, ease: "easeOut", delay: chip.delay }}
-          className={`absolute z-10 pointer-events-none ${chip.className}`}
-        >
-          <div className="glass-strong rounded-2xl px-3.5 py-2.5 flex items-center gap-2.5 shadow-glass">
-            <div
-              className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0"
-              style={{ background: `${chip.tint}1f`, boxShadow: `0 0 18px ${chip.tint}30` }}
-            >
-              <chip.icon size={15} style={{ color: chip.tint }} />
-            </div>
-            <div className="leading-tight">
-              <p className="text-[11px] font-bold text-white/90">{chip.title}</p>
-              <p className="text-[10px] text-white/45">{chip.sub}</p>
-            </div>
-          </div>
-        </motion.div>
-      ))}
 
       {/* hero text — LEFT FOREGROUND, separate from the 3D characters */}
       <div className="relative z-10 pointer-events-none min-h-screen flex items-center">
@@ -266,9 +259,10 @@ function Hero() {
               initial={{ opacity: 0, y: 20 }}
               animate={ready ? { opacity: 1, y: 0 } : {}}
               transition={{ duration: 0.7, ease: "easeOut" }}
-              className="inline-flex items-center gap-2 glass rounded-full px-4 py-1.5 text-[11px] tracking-[0.16em] uppercase text-pink mb-5"
+              className="inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-[11px] tracking-[0.16em] uppercase mb-5 border border-[#B96F85]/30 shadow-[0_4px_18px_rgba(50,19,33,0.18)]"
+              style={{ backgroundColor: "#F4DCE4", color: "#7A1638" }}
             >
-              <Sparkles size={13} /> {t("ld.companion", "Your AI-Powered Healthcare Companion")}
+              <Sparkles size={13} style={{ color: "#C64F78" }} /> {t("ld.companion", "Your AI-Powered Healthcare Companion")}
             </motion.div>
 
             <motion.h1
@@ -276,19 +270,21 @@ function Hero() {
               animate={ready ? { opacity: 1, y: 0 } : {}}
               transition={{ duration: 0.8, ease: "easeOut", delay: 0.12 }}
               className="text-4xl sm:text-5xl lg:text-[3.4rem] font-extrabold leading-[1.08]"
+              style={{ color: "#FFF8F6", textShadow: "0 2px 24px rgba(15,10,20,0.35)" }}
             >
               {t("ld.heroLine1", "Every")}{" "}
-              <span className="text-gradient-pink">{t("ld.heroWord1", "Voice")}</span>{" "}
+              <span style={{ color: "#F6A6C1" }}>{t("ld.heroWord1", "Voice")}</span>{" "}
               {t("ld.heroLine1b", "Matters.")}
               <br />
-              <span className="text-gradient-lav">{t("ld.heroLine2", "Every Life Counts.")}</span>
+              <span style={{ color: "#F6A6C1" }}>{t("ld.heroLine2", "Every Life Counts.")}</span>
             </motion.h1>
 
             <motion.p
               initial={{ opacity: 0, y: 20 }}
               animate={ready ? { opacity: 1, y: 0 } : {}}
               transition={{ duration: 0.8, ease: "easeOut", delay: 0.26 }}
-              className="mt-4 text-[#c7b8c9] text-sm sm:text-base max-w-md leading-relaxed"
+              className="mt-4 text-sm sm:text-base max-w-md leading-relaxed"
+              style={{ color: "#FFF8F6", textShadow: "0 1px 14px rgba(15,10,20,0.25)" }}
             >
               {t(
                 "ld.heroSub",
@@ -302,10 +298,21 @@ function Hero() {
               transition={{ duration: 0.8, ease: "easeOut", delay: 0.4 }}
               className="mt-7 flex flex-wrap gap-4 pointer-events-auto"
             >
-              <Link to="/login" className="btn-mint px-7 py-3.5 text-sm inline-flex items-center gap-2">
+              <Link
+                to="/login"
+                className="px-7 py-3.5 text-sm inline-flex items-center gap-2 rounded-2xl font-bold text-white shadow-[0_10px_30px_rgba(122,22,56,0.35)] transition hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-[#F6A6C1]/70"
+                style={{ backgroundColor: "#C64F78" }}
+              >
                 {t("nav.getStarted")} <ArrowRight size={16} />
               </Link>
-              <a href="#features" className="btn-ghost px-7 py-3.5 text-sm inline-flex items-center gap-2 glass">
+              <a
+                href="#features"
+                className="px-7 py-3.5 text-sm inline-flex items-center gap-2 rounded-2xl font-bold text-white backdrop-blur-md transition hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-[#F6A6C1]/50"
+                style={{
+                  backgroundColor: "rgba(255, 248, 246, 0.08)",
+                  border: "1px solid rgba(246, 166, 193, 0.55)",
+                }}
+              >
                 {t("nav.exploreFeatures")}
               </a>
             </motion.div>
@@ -314,7 +321,7 @@ function Hero() {
               initial={{ opacity: 0 }}
               animate={ready ? { opacity: 1 } : {}}
               transition={{ duration: 0.8, ease: "easeOut", delay: 0.55 }}
-              className="mt-8 hidden sm:flex items-center gap-5 text-[11px] tracking-[0.14em] uppercase text-white/45"
+              className="mt-8 hidden sm:flex items-center gap-5 text-[11px] tracking-[0.14em] uppercase text-white/55"
             >
               <span className="inline-flex items-center gap-1.5">
                 <Ear size={13} className="text-pink" /> {t("app.listen")}
@@ -332,7 +339,7 @@ function Hero() {
 
       {/* replay + disclaimer pinned to the bottom */}
       <div className="absolute bottom-4 inset-x-0 z-10 flex items-end justify-between px-5 sm:px-8 gap-3 pointer-events-none">
-        <p className="hidden sm:block text-[10px] text-white/35 max-w-[210px] leading-snug">
+        <p className="hidden sm:block text-[10px] text-white/45 max-w-[210px] leading-snug">
           {t(
             "ld.qrDecorative",
             "The holographic QR is a decorative visual — it is not a scannable beneficiary code."
@@ -344,9 +351,6 @@ function Hero() {
         >
           <RotateCcw size={13} /> {t("ld.replay", "Replay introduction")}
         </button>
-        <p className="hidden sm:block text-[10px] text-white/25 max-w-[210px] leading-snug text-right">
-          {t("ld.syntheticOnly", "Synthetic demo data only.")}
-        </p>
       </div>
 
       {/* marks hero timeline done for entrance animations */}
@@ -365,17 +369,20 @@ function HeroReadiness({ onReady }) {
 
 /* ============================== SECTIONS ============================== */
 
-function FeatureCard({ icon: Icon, title, children, tint = "#f078ad" }) {
+function FeatureCard({ icon: Icon, title, children, tint = "#e8a8b8" }) {
   return (
-    <motion.div {...fadeUp} className="glass rounded-3xl p-7 hover:border-pink/40 transition-colors group">
+    <motion.div
+          {...fadeUp}
+          className="card-ivory rounded-3xl p-7 hover:border-pink/45 transition-colors group"
+        >
       <div
         className="w-12 h-12 rounded-2xl flex items-center justify-center mb-5 group-hover:scale-110 transition-transform"
         style={{ background: `${tint}1f`, boxShadow: `0 0 24px ${tint}33` }}
       >
         <Icon size={22} style={{ color: tint }} />
       </div>
-      <h3 className="font-bold text-lg mb-2.5">{title}</h3>
-      <p className="text-sm text-[#c7b8c9]/80 leading-relaxed">{children}</p>
+      <h3 className="font-bold text-lg mb-2.5 text-teal-deep">{title}</h3>
+      <p className="text-sm text-teal-deep/60 leading-relaxed">{children}</p>
     </motion.div>
   );
 }
@@ -387,7 +394,7 @@ function SectionBackdrop({ id, children, className = "" }) {
       className={`relative ${className}`}
       style={{
         background:
-          "linear-gradient(180deg, rgba(33,19,41,0.0) 0%, rgba(33,19,41,0.9) 12%, rgba(33,19,41,0.9) 88%, rgba(33,19,41,0.0) 100%)",
+          "linear-gradient(180deg, rgba(255,248,246,0) 0%, rgba(255,248,246,1) 10%, rgba(255,248,246,1) 90%, rgba(255,248,246,0) 100%)",
       }}
     >
       {children}
@@ -402,12 +409,12 @@ function Features() {
       <section className="relative max-w-7xl mx-auto px-5 py-24">
         <motion.div {...fadeUp} className="text-center mb-14">
           <p className="section-eyebrow mb-3">{t("ld.capabilities", "Capabilities")}</p>
-          <h2 className="text-3xl sm:text-4xl font-extrabold">
+          <h2 className="text-3xl sm:text-4xl font-extrabold text-teal-deep">
             {t("ld.featuresTitle1", "Built around the")}{" "}
             <span className="text-gradient-pink">{t("ld.featuresWord", "voice")}</span>,{" "}
             {t("ld.featuresTitle2", "not the keyboard.")}
           </h2>
-          <p className="text-[#c7b8c9]/80 mt-4 max-w-2xl mx-auto text-sm sm:text-base">
+          <p className="text-teal-deep/60 mt-4 max-w-2xl mx-auto text-sm sm:text-base">
             {t(
               "ld.featuresSub",
               "Lengthy registers become simple conversations. The system connects what it hears into living health histories."
@@ -422,13 +429,13 @@ function Features() {
               "Record pregnancy visits, newborn details, immunisations and follow-ups by speaking naturally — no lengthy typing in the field."
             )}
           </FeatureCard>
-          <FeatureCard icon={Network} title={t("card.pulseThread.title", "Pulse Thread")} tint="#bba6ff">
+          <FeatureCard icon={Network} title={t("card.pulseThread.title", "Pulse Thread")} tint="#a8c8b5">
             {t(
               "ld.f2.body",
               "Every record connects through a unique beneficiary ID — a longitudinal timeline of ANC checkups, weights, vaccines and newborn visits."
             )}
           </FeatureCard>
-          <FeatureCard icon={Activity} title={t("card.pulseDrift.title", "Pulse Drift")} tint="#bba6ff">
+          <FeatureCard icon={Activity} title={t("card.pulseDrift.title", "Pulse Drift")} tint="#a8c8b5">
             {t(
               "ld.f3.body",
               "Deterministic rules quietly surface overdue checkups, missed vaccination schedules and missing expected records for timely follow-up."
@@ -446,7 +453,7 @@ function Features() {
               "Schedule pregnancy checkups, vaccination and newborn follow-up reminders — with consent-based, non-sensitive SMS notifications."
             )}
           </FeatureCard>
-          <FeatureCard icon={QrCode} title={t("ld.f6.title", "QR beneficiary profiles")} tint="#8755d9">
+          <FeatureCard icon={QrCode} title={t("ld.f6.title", "QR beneficiary profiles")} tint="#98566c">
             {t(
               "ld.f6.body",
               "Each beneficiary carries an anonymous QR identity. Scan to open their connected history — never health data inside the code itself."
@@ -488,7 +495,7 @@ function Steps() {
   ];
   return (
     <section className="relative max-w-7xl mx-auto px-5 py-16">
-      <div className="glass rounded-[2rem] p-8 sm:p-12">
+      <div className="card-ivory rounded-[2rem] p-8 sm:p-12">
         <div className="grid md:grid-cols-3 gap-10 relative">
           <div className="hidden md:block absolute top-9 left-[16%] right-[16%] divider-fade" />
           {steps.map((s, i) => (
@@ -498,11 +505,11 @@ function Steps() {
               transition={{ ...fadeUp.transition, delay: i * 0.15 }}
               className="text-center relative"
             >
-              <div className="w-[72px] h-[72px] mx-auto rounded-full glass flex items-center justify-center mb-5 relative z-10 bg-bg-base/60">
+              <div className="w-[72px] h-[72px] mx-auto rounded-full flex items-center justify-center mb-5 relative z-10 bg-blush/15">
                 <s.icon size={28} className="text-pink" />
               </div>
-              <h3 className="font-extrabold tracking-[0.2em] text-sm mb-3">{s.title}</h3>
-              <p className="text-sm text-[#c7b8c9]/80 max-w-xs mx-auto leading-relaxed">{s.text}</p>
+              <h3 className="font-extrabold tracking-[0.2em] text-sm mb-3 text-teal-deep">{s.title}</h3>
+              <p className="text-sm text-teal-deep/60 max-w-xs mx-auto leading-relaxed">{s.text}</p>
             </motion.div>
           ))}
         </div>
@@ -568,7 +575,7 @@ function HowItWorks() {
       <section className="relative max-w-7xl mx-auto px-5 py-24">
         <motion.div {...fadeUp} className="text-center mb-14">
           <p className="section-eyebrow mb-3">{t("ld.howItWorks", "How it works")}</p>
-          <h2 className="text-3xl sm:text-4xl font-extrabold">
+          <h2 className="text-3xl sm:text-4xl font-extrabold text-teal-deep">
             {t("ld.sixSteps", "Six steps.")}{" "}
             <span className="text-gradient-pink">{t("ld.oneConversation", "One conversation.")}</span>
           </h2>
@@ -581,23 +588,26 @@ function HowItWorks() {
               transition={{ ...fadeUp.transition, delay: (i % 3) * 0.1 }}
               className="glass rounded-3xl p-7 relative overflow-hidden"
             >
-              <span className="absolute -top-3 -right-1 text-[5rem] font-black text-white/[0.045] select-none">
+              <span className="absolute -top-3 -right-1 text-[5rem] font-black text-teal-deep/[0.05] select-none">
                 {f.n}
               </span>
               <div className="flex items-center gap-3 mb-4">
                 <div className="w-10 h-10 rounded-xl bg-pink/10 flex items-center justify-center">
                   <f.icon size={19} className="text-pink" />
                 </div>
-                <h3 className="font-bold">{f.title}</h3>
+                <h3 className="font-bold text-teal-deep">{f.title}</h3>
               </div>
-              <p className="text-sm text-[#c7b8c9]/80 leading-relaxed">{f.text}</p>
+              <p className="text-sm text-teal-deep/60 leading-relaxed">{f.text}</p>
             </motion.div>
           ))}
         </div>
-        <motion.div {...fadeUp} className="mt-10 glass rounded-3xl p-8 text-center">
-          <p className="text-white/85 text-lg font-semibold max-w-3xl mx-auto leading-relaxed">
+        <motion.div
+            {...fadeUp}
+            className="mt-10 card-ivory rounded-3xl p-8 text-center"
+          >
+          <p className="text-teal-deep/80 text-lg font-semibold max-w-3xl mx-auto leading-relaxed">
             {t("ld.pitch1", "“Other voice registers record")}{" "}
-            <span className="text-white/50">{t("ld.pitch2", "what was said")}</span>.{" "}
+            <span className="text-teal-deep/45">{t("ld.pitch2", "what was said")}</span>.{" "}
             {t("ld.pitch3", "ASHA Swar Nirantar notices")}{" "}
             <span className="text-gradient-pink font-extrabold">{t("ld.pitch4", "what's changing")}</span>{" "}
             {t("ld.pitch5", "— and it does so safely.”")}
@@ -650,12 +660,12 @@ function Benefits() {
         <div className="grid lg:grid-cols-2 gap-12 items-center">
           <motion.div {...fadeUp}>
             <p className="section-eyebrow mb-3">{t("ld.benefitsEyebrow", "Benefits for ASHA workers")}</p>
-            <h2 className="text-3xl sm:text-4xl font-extrabold leading-tight">
+            <h2 className="text-3xl sm:text-4xl font-extrabold leading-tight text-teal-deep">
               {t("ld.lessPaper", "Less paperwork.")}
               <br />
               <span className="text-gradient-pink">{t("ld.morePresence", "More presence.")}</span>
             </h2>
-            <p className="text-[#c7b8c9]/85 mt-5 text-sm sm:text-base leading-relaxed max-w-lg">
+            <p className="text-teal-deep/65 mt-5 text-sm sm:text-base leading-relaxed max-w-lg">
               {t(
                 "ld.benefitsBody",
                 "ASHA workers are the heartbeat of village healthcare. Their time belongs with people — not registers. ASHA Swar Nirantar turns the field register into a conversation, keeps every history connected, and watches quietly over every follow-up."
@@ -663,32 +673,32 @@ function Benefits() {
             </p>
             <div className="mt-8 grid sm:grid-cols-2 gap-4">
               {items.map((it) => (
-                <div key={it.title} className="glass rounded-2xl p-5">
+                <div key={it.title} className="card-ivory rounded-2xl p-5">
                   <div className="flex items-center gap-2.5 mb-2">
                     <it.icon size={17} className="text-pink" />
                     <h4 className="font-bold text-sm">{it.title}</h4>
                   </div>
-                  <p className="text-xs text-[#c7b8c9]/75 leading-relaxed">{it.text}</p>
+                  <p className="text-xs text-teal-deep/55 leading-relaxed">{it.text}</p>
                 </div>
               ))}
             </div>
           </motion.div>
 
           <motion.div {...fadeUp} className="relative">
-            <div className="glass rounded-[2rem] p-8 sm:p-10 relative overflow-hidden">
+            <div className="card-ivory rounded-[2rem] p-8 sm:p-10 relative overflow-hidden">
               <div
                 className="absolute -top-24 -right-24 w-72 h-72 rounded-full pointer-events-none"
-                style={{ background: "radial-gradient(circle, rgba(240,120,173,0.2), transparent 70%)" }}
+                style={{ background: "radial-gradient(circle, rgba(232,168,184,0.28), transparent 70%)" }}
               />
               {/* Tara & worker tag cards */}
               <div className="relative space-y-5">
-                <div className="glass-strong rounded-2xl p-5 flex items-start gap-4">
+                <div className="rounded-2xl bg-blush/15 p-5 flex items-start gap-4">
                   <div className="w-11 h-11 rounded-full bg-pink/15 flex items-center justify-center shrink-0">
                     <Sparkles size={19} className="text-pink" />
                   </div>
                   <div>
                     <p className="text-sm font-bold mb-1">{t("ld.taraTitle", "Tara · AI companion")}</p>
-                    <p className="text-xs text-[#c7b8c9]/80 leading-relaxed">
+                    <p className="text-xs text-teal-deep/60 leading-relaxed">
                       {t(
                         "ld.taraBody",
                         "“I've saved Lakshmi's visit — 28 weeks, BP 120/80, weight 54 kg. Her next ANC checkup is due in 12 days. Shall I schedule a reminder?”"
@@ -696,13 +706,13 @@ function Benefits() {
                     </p>
                   </div>
                 </div>
-                <div className="glass-strong rounded-2xl p-5 flex items-start gap-4">
+                <div className="rounded-2xl bg-blush/15 p-5 flex items-start gap-4">
                   <div className="w-11 h-11 rounded-full bg-lavender/15 flex items-center justify-center shrink-0">
                     <Activity size={19} className="text-lavender" />
                   </div>
                   <div>
                     <p className="text-sm font-bold mb-1">{t("card.pulseThread.title", "Pulse Thread")}</p>
-                    <p className="text-xs text-[#c7b8c9]/80 leading-relaxed">
+                    <p className="text-xs text-teal-deep/60 leading-relaxed">
                       {t(
                         "ld.threadBody",
                         "Mother & child histories, connected by one anonymous QR identity — visible in a single glance."
@@ -711,7 +721,7 @@ function Benefits() {
                   </div>
                 </div>
                 <div
-                  className="glass-strong rounded-2xl p-5 flex items-start gap-4"
+                  className="rounded-2xl bg-blush/15 p-5 flex items-start gap-4"
                   style={{ borderColor: "rgba(255,128,111,0.35)" }}
                 >
                   <div className="w-11 h-11 rounded-full bg-coral/15 flex items-center justify-center shrink-0">
@@ -719,7 +729,7 @@ function Benefits() {
                   </div>
                   <div>
                     <p className="text-sm font-bold mb-1">{t("ld.safetyTitle", "Safety first")}</p>
-                    <p className="text-xs text-[#c7b8c9]/80 leading-relaxed">
+                    <p className="text-xs text-teal-deep/60 leading-relaxed">
                       {t(
                         "ld.safetyBody",
                         "Rule-based danger-sign detection using the approved list. Tara never diagnoses — she flags verified phrases: “Refer to PHC as per approved guidelines.”"
@@ -745,14 +755,14 @@ function FinalCTA() {
         className="relative rounded-[2.5rem] overflow-hidden p-12 sm:p-20 text-center"
         style={{
           background:
-            "linear-gradient(140deg, rgba(232,77,155,0.16), rgba(135,85,217,0.12)), linear-gradient(160deg, #28152d, #100c18)",
-          border: "1px solid rgba(240,120,173,0.28)",
+            "linear-gradient(140deg, rgba(232,168,184,0.24), rgba(168,200,181,0.16)), linear-gradient(160deg, #98566c, #34434a)",
+          border: "1px solid rgba(232,168,184,0.4)",
         }}
       >
         <div
           className="absolute inset-0 pointer-events-none"
           style={{
-            background: "radial-gradient(600px 300px at 50% 0%, rgba(232,77,155,0.14), transparent)",
+            background: "radial-gradient(600px 300px at 50% 0%, rgba(232,168,184,0.2), transparent)",
           }}
         />
         <div className="relative">
@@ -762,7 +772,7 @@ function FinalCTA() {
             <br />
             <span className="text-gradient-pink">{t("ld.readyLine2", "its voice pulse?")}</span>
           </h2>
-          <p className="text-[#c7b8c9]/85 mt-5 max-w-xl mx-auto text-sm sm:text-base">
+          <p className="text-white/75 mt-5 max-w-xl mx-auto text-sm sm:text-base">
             {t("ld.readyBody", "Sign in and start your first voice visit. Tara is waiting to listen.")}
           </p>
           <Link
@@ -780,15 +790,15 @@ function FinalCTA() {
 function Footer() {
   const { t } = useI18n();
   return (
-    <footer className="border-t border-white/5 py-10">
-      <div className="max-w-7xl mx-auto px-5 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-white/40">
+    <footer className="border-t border-blush/25 bg-white/60 py-10">
+      <div className="max-w-7xl mx-auto px-5 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-teal-deep/50">
         <div className="flex items-center gap-2.5">
           <Orb size={10} />
-          <span className="font-bold text-white/70">{t("app.name")}</span>
+          <span className="font-bold text-teal-deep/80">{t("app.name")}</span>
           <span>· {t("app.tagline")}</span>
         </div>
         <p className="text-center sm:text-right">
-          {t("ld.footerLine", "Every Voice Matters. Every Life Counts. · Synthetic demo data only")}
+          {t("ld.footerLine", "Every Voice Matters. Every Life Counts.")}
         </p>
       </div>
     </footer>

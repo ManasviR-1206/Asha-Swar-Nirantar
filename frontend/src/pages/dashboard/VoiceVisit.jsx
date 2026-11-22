@@ -34,10 +34,12 @@ import {
   Check,
   Users,
 } from "lucide-react";
-import { api, speak, LANGUAGES } from "../../lib/api.js";
+import { api, speak, stopSpeaking, retryPendingPlayback, pauseSpeaking, resumeSpeaking, getPlaybackState, LANGUAGES } from "../../lib/api.js";
 import { createVoiceSession, VoiceError, VoiceErrorKind } from "../../lib/voice.js";
+import { formatTaraHeardTranscript, mergeExtractedRecord, selectBeneficiaryName } from "../../lib/beneficiaryName.js";
 import { useAuth } from "../../lib/auth.jsx";
 import { showToast } from "../../components/ui/Toast.jsx";
+import { IdentityBadge } from "../../components/dashboard/Identity.jsx";
 import { useI18n } from "../../lib/i18n.jsx";
 
 /* ----------------------------- field metadata ----------------------------- */
@@ -59,6 +61,7 @@ const FIELD_DEFS = [
     label: "field.bp",
     icon: Activity,
     from: (r) => (r.bp_sys && r.bp_dia ? `${r.bp_sys}/${r.bp_dia}` : r.bp_sys ? `${r.bp_sys}/—` : null),
+    render: (v) => `${v} mmHg`,
   },
   { key: "weight_kg", label: "field.weight", icon: Scale, render: (v) => `${v} kg` },
   { key: "hemoglobin", label: "field.hemoglobin", icon: HeartPulse, render: (v) => `${v} g/dL` },
@@ -69,7 +72,7 @@ const FIELD_DEFS = [
     icon: Sparkles,
     render: (v, t) => (v ? t("common.yes") : t("common.no")),
   },
-  { key: "td_vaccine", label: "field.tdVaccine", icon: Syringe, render: (v) => v },
+  { key: "td_vaccine", label: "field.tdVaccine", icon: Syringe, render: (v) => v ? `TT/TD ${String(v).replace(/^TT|^TD/i, "")}`.replace(/TT\/TD\s*$/, String(v)) : v },
 
   // Child & Newborn Health
   { key: "vaccine_name", label: "field.vaccine", icon: Syringe, render: (v) => v },
@@ -126,7 +129,7 @@ const FIELD_DEFS = [
     icon: Sparkles,
     render: (v, t) => (v ? t("common.yes") : t("common.no")),
   },
-  { key: "follow_up_days", label: "hh.followUpIn", icon: CalendarDays, render: (v) => v },
+  { key: "follow_up_days", label: "hh.followUpIn", icon: CalendarDays, render: (v) => `${v} days` },
   { key: "follow_up_date", label: "field.followUpDate", icon: CalendarDays, render: (v) => v },
 ];
 
@@ -151,7 +154,7 @@ const SECTION_DEFS = [
     titleKey: "sec.child",
     fallback: "Child & Newborn Health",
     icon: Syringe,
-    keys: ["vaccine_name", "temperature", "height_cm", "feeding", "jaundice"],
+    keys: ["vaccine_name", "temperature", "feeding", "jaundice"],
   },
   {
     id: "measurements",
@@ -165,7 +168,7 @@ const SECTION_DEFS = [
     titleKey: "sec.elderly",
     fallback: "Elderly Health",
     icon: Activity,
-    keys: ["age", "bp", "blood_sugar", "mobility"],
+    keys: ["bp", "blood_sugar", "mobility"],
   },
   {
     id: "sanitation",
@@ -281,6 +284,48 @@ function changedSummary(merged, prev, keys, t) {
   return lines.join(" ") || t("vv.noChanges", "No changes detected.");
 }
 
+function parseVoiceCorrections(text) {
+  const t = (text || "").trim();
+  const lower = t.toLower();
+  const corrections = [];
+  const push = (field, value, label) => corrections.push({ field, value, label });
+
+  // Age: "age is 37", "her age is 37 now", "age 37 years"
+  const age = lower.match(/\b(?:age|umar)\s*(?:is|to|should be|=|:)?\s*(\d{1,3})\b/) || lower.match(/\b(\d{1,3})\s*(?:years old|yrs old|year old)\b/);
+  if (age && /\b(age|years old|yrs old|year old|umar)\b/.test(lower)) push("age", parseInt(age[1], 10), "Age");
+
+  // BP: "bp 130/85", "130 over 85"
+  const bp = lower.match(/\b(?:bp|blood pressure)\s*(?:is|to|should be|=|:)?\s*(\d{2,3})\s*(?:\/|over|upon)\s*(\d{2,3})\b/) || lower.match(/\b(\d{2,3})\s*(?:\/|over|upon)\s*(\d{2,3})\b/);
+  if (bp && (/\b(bp|blood pressure|over)\b/.test(lower) || /\/\d{2,3}/.test(lower))) {
+    push("bp_sys", parseInt(bp[1], 10), "BP systolic");
+    push("bp_dia", parseInt(bp[2], 10), "BP diastolic");
+  }
+
+  // Weight
+  const wt = lower.match(/\b(?:weight)\s*(?:is|to|should be|=|:)?\s*(\d+(?:\.\d+)?)\s*(?:kg|kilo|kilogram)?\b/);
+  if (wt) push("weight_kg", parseFloat(wt[1]), "Weight");
+
+  // Height
+  const ht = lower.match(/\b(?:height)\s*(?:is|to|should be|=|:)?\s*(\d+(?:\.\d+)?)\s*(?:cm)?\b/);
+  if (ht) push("height_cm", parseFloat(ht[1]), "Height");
+
+  // Temperature
+  const temp = lower.match(/\b(?:temp|temperature|fever)\s*(?:is|to|should be|=|:)?\s*(\d+(?:\.\d+)?)\b/);
+  if (temp) push("temperature", parseFloat(temp[1]), "Temperature");
+
+  // Visit date
+  const vd = lower.match(/\b(?:next visit|visit date|follow up|follow-up)\s*(?:is|to|on|should be)?\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\b/);
+  if (vd) push("follow_up_date", vd[1], "Follow-up date");
+
+  // Cancel visit
+  if (/\b(cancel this visit|discard this visit|delete this visit)\b/.test(lower)) push("__cancel_visit__", true, "Cancel visit");
+
+  // de-dup by field, keep last
+  const byField = new Map();
+  for (const c of corrections) byField.set(c.field, c);
+  return Array.from(byField.values());
+}
+
 function fieldLabelKey(key) {
   const def = FIELD_DEFS.find((d) => d.key === key);
   return def ? def.label : key;
@@ -351,6 +396,8 @@ export default function VoiceVisit() {
   const [benList, setBenList] = useState([]);
   const benListRef = useRef([]);
   const [selectedBenId, setSelectedBenId] = useState(searchParams.get("beneficiary") || "");
+  const selectedBenIdRef = useRef(searchParams.get("beneficiary") || "");
+  useEffect(() => { selectedBenIdRef.current = selectedBenId; }, [selectedBenId]);
   const [contextBen, setContextBen] = useState(null);
   const contextRef = useRef(null);
   useEffect(() => {
@@ -364,35 +411,71 @@ export default function VoiceVisit() {
   useEffect(() => {
     selectedHhRef.current = selectedHhId;
   }, [selectedHhId]);
+  const [benSearch, setBenSearch] = useState("");
+  const [hhSearch, setHhSearch] = useState("");
+  const [benConfirmed, setBenConfirmed] = useState(false);
+  const [hhConfirmed, setHhConfirmed] = useState(false);
+  const benConfirmedRef = useRef(false);
+  const hhConfirmedRef = useRef(false);
+  useEffect(() => { setBenConfirmed(false); benConfirmedRef.current = false; }, [selectedBenId]);
+  useEffect(() => { setHhConfirmed(false); hhConfirmedRef.current = false; }, [selectedHhId]);
+  useEffect(() => { benConfirmedRef.current = benConfirmed; }, [benConfirmed]);
+  useEffect(() => { hhConfirmedRef.current = hhConfirmed; }, [hhConfirmed]);
 
   /* ---------- visit state ---------- */
   const [status, setStatus] = useState("ready");
+  const statusRef = useRef("ready");
+  statusRef.current = status;
   const [voiceProvider, setVoiceProvider] = useState("");
   const [partial, setPartial] = useState("");
   const [finalText, setFinalText] = useState("");
   const partialRef = useRef("");
   const finalRef = useRef("");
+  const speechEndRef = useRef(null);
   const [record, setRecord] = useState(null);
   const recordRef = useRef(null);
   const [changedKeys, setChangedKeys] = useState([]);
   const [dangerFlags, setDangerFlags] = useState([]);
   const [taraLine, setTaraLine] = useState("");
+  const [ttfaMs, setTtfaMs] = useState(null);
+  const [playbackError, setPlaybackError] = useState("");
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+  const [playbackStatus, setPlaybackStatus] = useState("idle"); // idle|preparing|speaking|paused|completed|failed|blocked
+  const [playbackProvider, setPlaybackProvider] = useState("");
+  const lastSpokenRef = useRef("");
+  const [ttfaHistory, setTtfaHistory] = useState([]);
+  const [correctionHistory, setCorrectionHistory] = useState([]);
   const [level, setLevel] = useState(0);
   const [micError, setMicError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [savedResult, setSavedResult] = useState(null);
   const [registerCandidate, setRegisterCandidate] = useState(null);
   const [showHow, setShowHow] = useState(false);
+  const [showManualLink, setShowManualLink] = useState(false);
 
   /* Multi-entity visit extraction state */
   const [multiVisits, setMultiVisits] = useState([]);
+  const [sessionMeta, setSessionMeta] = useState(null);
+  const multiVisitsRef = useRef([]);
+  const sessionMetaRef = useRef(null);
+  multiVisitsRef.current = multiVisits;
+  sessionMetaRef.current = sessionMeta;
+  const sessionIdRef = useRef(null);
+  const extractAbortRef = useRef(null);
   const [scenarioType, setScenarioType] = useState("single_beneficiary");
   const [editingCardIdx, setEditingCardIdx] = useState(null);
   const [manualEditKey, setManualEditKey] = useState("");
   const [manualEditVal, setManualEditVal] = useState("");
   const [disambiguateCandidates, setDisambiguateCandidates] = useState(null);
+  const [singleIdentity, setSingleIdentity] = useState(null); // {status, matchedBeneficiary, candidates, reason, spokenName}
+  const singleIdentityRef = useRef(null);
+  useEffect(() => { singleIdentityRef.current = singleIdentity; }, [singleIdentity]);
+  const [editingTranscript, setEditingTranscript] = useState(false);
+  const [transcriptDraft, setTranscriptDraft] = useState("");
 
   const sessionRef = useRef(null);
+  const confirmSaveSingleRef = useRef(null);
+  const confirmSaveBatchRef = useRef(null);
   const correctingRef = useRef(false);
   const [correcting, setCorrecting] = useState(false);
 
@@ -453,11 +536,57 @@ export default function VoiceVisit() {
 
   const stopAudioChain = useCallback(() => {
     try {
+      stopSpeaking();
+    } catch {}
+    try {
       sessionRef.current?.abort();
     } catch {}
     sessionRef.current = null;
     setLevel(0);
+    setPlaybackStatus("idle");
   }, []);
+
+  const reportTtfa = useCallback((ms) => {
+    if (!Number.isFinite(ms) || ms < 0) return;
+    setTtfaMs(ms);
+    setTtfaHistory((prev) => {
+      const next = [...prev, ms].slice(-20);
+      return next;
+    });
+  }, []);
+
+  const speakWithMetrics = useCallback(async (text) => {
+    const speechEnd = speechEndRef.current;
+    const clean = String(text || "").trim();
+    lastSpokenRef.current = clean;
+    setPlaybackError("");
+    setAutoplayBlocked(false);
+    setPlaybackStatus("preparing");
+    setPlaybackProvider("");
+    const result = await speak(clean, languageRef.current, mode, {
+      onFirstAudio: () => {
+        setPlaybackStatus("speaking");
+        const ms = speechEnd ? Math.max(0, Math.round(performance.now() - speechEnd)) : null;
+        if (ms != null) reportTtfa(ms);
+      },
+    });
+    if (result?.provider) setPlaybackProvider(result.provider);
+    if (result?.autoplayBlocked) {
+      setAutoplayBlocked(true);
+      setPlaybackStatus("blocked");
+      setPlaybackError(t("vv.tapToHear", "Browser blocked autoplay. Tap to hear Tara."));
+    } else if (result?.error || result?.unsupported) {
+      setPlaybackStatus("failed");
+      setPlaybackError(t("vv.playbackFailed", "Tara audio could not be played. You can replay or continue with the on-screen text."));
+    } else if (result?.interrupted) {
+      setPlaybackStatus("idle");
+    } else if (result?.ended) {
+      setPlaybackStatus("completed");
+    } else {
+      setPlaybackStatus(getPlaybackState() === "speaking" ? "speaking" : "idle");
+    }
+    return result;
+  }, [mode, reportTtfa, t]);
 
   const handleFinal = useCallback(
     async (text) => {
@@ -472,39 +601,123 @@ export default function VoiceVisit() {
         showToast(t("vv.noSpeech"), "info");
         return;
       }
+
+      const lowerTxt = txt.toLowerCase().replace(/[.!?,]/g, " ").replace(/\s+/g, " ").trim();
+      const isConfirmState = statusRef.current === "confirm";
+      const looksLikeCorrection = /\b(no|not|wrong|change|correct|update|make it|should be|instead|actually)\b/.test(lowerTxt) && /\d|age|bp|weight|height|temp|date|name|vaccine|phone|visit/.test(lowerTxt);
+      const isCancelIntent = !looksLikeCorrection && /\b(cancel|discard|delete|stop|don't save|do not save|mat karo|radd karo)\b/.test(lowerTxt);
+      const isConfirmIntent = !looksLikeCorrection && /\b(yes save|yes, save|save it|save this|confirm|confirmed|haan save|ha save|theek hai save|ok save|okay save)\b/.test(lowerTxt);
+      if (isConfirmState && isCancelIntent) {
+        setTaraLine("Visit discarded. Nothing was saved.");
+        resetAll();
+        return;
+      }
+      if (isConfirmState && isConfirmIntent) {
+        setStatus("processing");
+        const voiceConfirmation = { confirmed: true, method: "voice", phrase: txt, confirmed_at: new Date().toISOString() };
+        if ((multiVisitsRef.current?.length || 0) > 0 && sessionMetaRef.current?.id) {
+          await confirmSaveBatchRef.current?.(voiceConfirmation);
+        } else {
+          await confirmSaveSingleRef.current?.(voiceConfirmation);
+        }
+        return;
+      }
+
+      if (isConfirmState && looksLikeCorrection && recordRef.current && !multiVisitsRef.current?.length) {
+        const parsed = parseVoiceCorrections(txt);
+        const cancel = parsed.find((c) => c.field === "__cancel_visit__");
+        if (cancel) {
+          setTaraLine("Visit discarded. Nothing was saved.");
+          resetAll();
+          return;
+        }
+        if (parsed.length > 0) {
+          const prev = { ...recordRef.current };
+          const next = { ...recordRef.current };
+          const changed = [];
+          for (const c of parsed) {
+            if (c.field === "__cancel_visit__") continue;
+            const oldVal = prev[c.field];
+            if (oldVal !== c.value) changed.push({ field: c.field, label: c.label, old_value: oldVal, new_value: c.value, source: "voice_correction", transcript: txt, at: new Date().toISOString() });
+            next[c.field] = c.value;
+          }
+          recordRef.current = next;
+          setRecord(next);
+          setChangedKeys(changed.map((c) => c.field));
+          if (changed.length > 0) setCorrectionHistory((h) => [...h, ...changed]);
+          const readback = changed.length
+            ? formatTaraHeardTranscript(txt)
+            : `I heard: ${txt.trim()}. I could not identify a supported field to update. Please say, for example, age is 37 or BP is 130 over 85.`;
+          setTaraLine(readback);
+          setStatus("speaking");
+          speechEndRef.current = performance.now();
+          await speakWithMetrics(readback);
+          setStatus("confirm");
+          return;
+        }
+      }
+
+      const geoIntent = /\b(map|geopulse|show households|show village|pending visits|upcoming follow|maternal care|newborn care|referral|danger alert households)\b/.test(lowerTxt);
+      if (geoIntent && /\b(show|open|map|where|which households|geopulse)\b/.test(lowerTxt)) {
+        let f = "all";
+        if (/pending visit/.test(lowerTxt)) f = "pending_visits";
+        else if (/upcoming follow/.test(lowerTxt)) f = "upcoming_followups";
+        else if (/maternal/.test(lowerTxt)) f = "maternal_care";
+        else if (/newborn|child/.test(lowerTxt)) f = "newborn_care";
+        else if (/referral|danger|alert/.test(lowerTxt)) f = "referrals";
+        setStatus("ready");
+        setTaraLine(`Opening GeoPulse map${f !== "all" ? `: ${f.replace(/_/g, " ")}` : ""}.`);
+        navigate(`/app/geopulse?filter=${encodeURIComponent(f)}`);
+        return;
+      }
+
       setStatus("processing");
+      const pipelineT0 = performance.now();
+      const pipeline = { speechEndMs: speechEndRef.current ? Math.round(speechEndRef.current) : null };
       try {
-        // Multi-entity extractor supporting Scenario A, B, C & voice corrections
-        const res = await api.post("/voice/extract-multi", {
-          transcript: txt,
+        if (extractAbortRef.current) extractAbortRef.current.abort();
+        const controller = new AbortController();
+        extractAbortRef.current = controller;
+        /* Single round trip: create/reuse session and extract. */
+        const clientSessionId = sessionIdRef.current || `s-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+        sessionIdRef.current = clientSessionId;
+        const tExtract = performance.now();
+        const session = await api.post("/voice/sessions/extract-direct", {
+          client_session_id: clientSessionId,
           language: languageRef.current,
-        });
+          transcript: txt,
+          mode,
+        }, { signal: controller.signal });
+        pipeline.extractMs = Math.round(performance.now() - tExtract);
+        pipeline.sessionMs = 0;
+        pipeline.backendMode = session?.mode;
 
-        const visits = res.visits || [];
-        const detectedScenario = res.scenario || "single_beneficiary";
+        const visits = session.visits || [];
+        const detectedScenario = session.scenario || "single_beneficiary";
         setScenarioType(detectedScenario);
-        setDangerFlags(res.danger_flags || []);
-
-        // Disambiguate names across the existing beneficiary list
-        const processedVisits = visits.map((v) => {
-          const rawName = v.beneficiary_name || "";
-          const list = benListRef.current;
-          const spoken = rawName.trim().toLowerCase();
-          const matches = list.filter((b) => {
-            const bn = (b.name || "").toLowerCase();
-            return bn === spoken || bn.split(/\s+/)[0] === spoken || bn.startsWith(spoken + " ") || spoken.startsWith(bn + " ");
-          });
-          return {
-            ...v,
-            matchedBeneficiary: matches.length === 1 ? matches[0] : null,
-            candidateMatches: matches.length > 1 ? matches : [],
-            needsRegistration: matches.length === 0 && rawName.length > 1,
-            raw_structured: v.raw_structured || {},
-          };
+        setDangerFlags(session.danger_flags || []);
+        setSessionMeta({
+          id: session.id,
+          scenario: detectedScenario,
+          householdVisits: session.household_visits || [],
+          corrections: session.corrections || [],
         });
+
+        // Each visit carries its own identity resolution result.
+        const processedVisits = visits.map((v) => ({
+          ...v,
+          temp_id: v.temp_id || v.visit_id,
+          matchedBeneficiary:
+            v.identity_status === "resolved" && v.beneficiary_id
+              ? { id: v.beneficiary_id, name: v.beneficiary_name }
+              : null,
+          candidateMatches: v.candidates || [],
+          needsRegistration: v.identity_status === "unresolved" && !!v.beneficiary_name,
+          raw_structured: v.raw_structured || {},
+        }));
 
         if (processedVisits.length > 1) {
-          // Multiple visits detected (Scenario B: Household members or Scenario C: Cross-household)
+          // Multiple beneficiaries in one continuous recording.
           setMultiVisits(processedVisits);
           setRecord(null);
           recordRef.current = null;
@@ -512,21 +725,59 @@ export default function VoiceVisit() {
           const spokenCount = processedVisits.length;
           const readLine =
             detectedScenario === "household_members"
-              ? `Extracted ${spokenCount} family members in ${res.household_id || "household"}. Review each visit.`
-              : `Extracted ${spokenCount} beneficiary visits across field locations. Review and confirm.`;
+              ? t("vv.readbackMembers", "Extracted {n} family members in one household. Review each visit.").replace("{n}", spokenCount)
+              : t("vv.readbackMulti", "Extracted {n} beneficiary visits. Review each one before saving.").replace("{n}", spokenCount);
           setTaraLine(readLine);
+          const tTts = performance.now();
           setStatus("speaking");
-          await speak(readLine, languageRef.current, mode);
+          await speakWithMetrics(readLine);
+          pipeline.ttsMs = Math.round(performance.now() - tTts);
+          pipeline.totalMs = Math.round(performance.now() - pipelineT0);
+          console.info("[voice-pipeline]", pipeline);
+          if (sessionRef.current === null) { /* may have been barged-in */ }
           setStatus("confirm");
           return;
         }
 
         // Single beneficiary visit (Scenario A or single parsed entity)
         const singleVisit = processedVisits[0];
-        const incoming = singleVisit ? singleVisit.raw_structured : {};
-        Object.entries(res.structured || {}).forEach(([k, v]) => {
+        const incoming = singleVisit ? { ...(singleVisit.raw_structured || {}) } : {};
+        const sessionStructured =
+          session?.structured && typeof session.structured === "object" && !Array.isArray(session.structured)
+            ? session.structured
+            : {};
+        Object.entries(sessionStructured).forEach(([k, v]) => {
           if (v !== null && v !== undefined && v !== "") incoming[k] = v;
         });
+        // Flatten nested extraction shapes so Structured Record fields populate reliably.
+        const pdRaw = incoming.personal_details && typeof incoming.personal_details === "object" ? incoming.personal_details : {};
+        const pdTop = singleVisit?.personal_details && typeof singleVisit.personal_details === "object" ? singleVisit.personal_details : {};
+        const pd = { ...pdRaw, ...Object.fromEntries(Object.entries(pdTop).filter(([,v]) => v !== null && v !== undefined && v !== "")) };
+        const measRaw = incoming.measurements && typeof incoming.measurements === "object" ? incoming.measurements : {};
+        const measTop = singleVisit?.measurements && typeof singleVisit.measurements === "object" ? singleVisit.measurements : {};
+        const meas = { ...measRaw, ...Object.fromEntries(Object.entries(measTop).filter(([,v]) => v !== null && v !== undefined && v !== "")) };
+        const spokenNameCandidate = (
+          singleVisit?.beneficiary_name ||
+          incoming.beneficiary_name ||
+          pd.name ||
+          incoming.name ||
+          singleVisit?.raw_structured?.beneficiary_name ||
+          singleVisit?.raw_structured?.name ||
+          singleVisit?.raw_structured?.personal_details?.name ||
+          ""
+        );
+        const normalizedSpokenName = selectBeneficiaryName(spokenNameCandidate);
+        if (normalizedSpokenName) {
+          incoming.beneficiary_name = normalizedSpokenName;
+          incoming.personal_details = { ...(incoming.personal_details && typeof incoming.personal_details === "object" ? incoming.personal_details : {}), ...pd, name: normalizedSpokenName };
+        }
+        if (incoming.age == null && pd.age != null) incoming.age = pd.age;
+        if (!incoming.gender && pd.gender) incoming.gender = pd.gender;
+        if (!incoming.category && (singleVisit?.category || incoming.category)) incoming.category = singleVisit?.category || incoming.category;
+        if (!incoming.visit_date && (singleVisit?.visit_date || incoming.visit_date)) incoming.visit_date = singleVisit?.visit_date || incoming.visit_date;
+        Object.entries(meas).forEach(([k, v]) => { if (incoming[k] == null && v !== null && v !== "") incoming[k] = v; });
+        if (!incoming.observations && Array.isArray(singleVisit?.observations)) incoming.observations = singleVisit.observations;
+        if (!incoming.follow_ups && Array.isArray(singleVisit?.follow_ups)) incoming.follow_ups = singleVisit.follow_ups;
 
         if (incoming.household_id && !selectedHhRef.current) {
           const key = String(incoming.household_id).toLowerCase();
@@ -540,32 +791,60 @@ export default function VoiceVisit() {
         }
 
         const keys = [];
-        let merged;
         const prev = recordRef.current ? { ...recordRef.current } : null;
-        if (correctingRef.current && recordRef.current) {
-          merged = { ...recordRef.current };
-          Object.entries(incoming).forEach(([k, v]) => {
-            if (merged[k] !== v) keys.push(k);
-            merged[k] = v;
-          });
-        } else {
-          merged = incoming;
-        }
+        const merged = mergeExtractedRecord(prev, incoming, { correcting: correctingRef.current });
+        Object.keys(incoming).forEach((k) => {
+          if (prev?.[k] !== merged[k]) keys.push(k);
+        });
 
         recordRef.current = merged;
         setRecord(merged);
         setChangedKeys(correctingRef.current ? (keys.length > 0 ? keys : Object.keys(incoming)) : []);
 
-        const line = correctingRef.current
-          ? `${changedSummary(merged, prev, keys.length > 0 ? keys : Object.keys(incoming), t)} ${t("vv.confirmQuestion")}`
-          : fullSummary(merged, contextRef.current?.name, t);
+        // Extraction-first: show extracted info directly. Do NOT auto-search DB or auto-link.
+        if (singleVisit && !correctingRef.current) {
+          const spokenName = (merged.beneficiary_name || singleVisit.beneficiary_name || "").trim();
+          const candidates = []; // no automatic candidate search
+          setDisambiguateCandidates(null);
+          setRegisterCandidate(null);
+          // Keep any existing manual selection? No - new extraction means new visit.
+          setSelectedBenId(""); selectedBenIdRef.current = "";
+          setBenConfirmed(false); benConfirmedRef.current = false;
+          setSingleIdentity({
+            status: spokenName ? "extracted_unlinked" : "name_missing",
+            matchedBeneficiary: null,
+            candidates,
+            reason: spokenName ? "Name extracted from transcript. Link beneficiary manually before saving." : "Beneficiary name not extracted.",
+            spokenName,
+          });
+        }
+
+        const transcriptForReadback = (finalRef.current || transcript || "").trim();
+        const line = transcriptForReadback
+          ? formatTaraHeardTranscript(transcriptForReadback)
+          : (correctingRef.current
+              ? `${changedSummary(merged, prev, keys.length > 0 ? keys : Object.keys(incoming), t)} ${t("vv.confirmQuestion")}`
+              : fullSummary(merged, merged.beneficiary_name || incoming.beneficiary_name || "", t));
         setTaraLine(line);
+        const tTts = performance.now();
         setStatus("speaking");
-        await speak(line, languageRef.current, mode);
+        await speakWithMetrics(line);
+        pipeline.ttsMs = Math.round(performance.now() - tTts);
+        pipeline.totalMs = Math.round(performance.now() - pipelineT0);
+        console.info("[voice-pipeline]", pipeline);
         setStatus("confirm");
       } catch (e) {
-        showToast(e.message || t("vv.analysisError"), "error");
+        if (e?.name === "AbortError" || /cancelled/i.test(e?.message || "")) {
+          // Cancelled by a newer extraction or user action; transcript is preserved.
+          return;
+        }
+        const msg = e?.message || t("vv.analysisError");
+        setMicError(`${msg} ${t("vv.retryExtractionHint", "Your transcript is preserved. Tap Retry extraction.")}`);
+        showToast(msg, "error");
         setStatus("ready");
+      } finally {
+        // Only clear if this is the current controller
+        if (extractAbortRef.current?.signal?.aborted) { /* keep */ }
       }
     },
     [mode, stopAudioChain, t]
@@ -609,19 +888,51 @@ export default function VoiceVisit() {
 
   const startListening = useCallback(
     async (isCorrection = false) => {
+      stopAudioChain(); // barge-in: stop Tara playback / previous session
+      speechEndRef.current = null;
       setMicError(null);
+      // Voice-first: no mandatory beneficiary selection before recording.
+      // Beneficiary identity is resolved from speech; ambiguity is handled after extraction.
       setVoiceProvider("");
       setPartial("");
       partialRef.current = "";
       setRegisterCandidate(null);
+      setDisambiguateCandidates(null);
+      setSingleIdentity(null); setEditingTranscript(false); setTranscriptDraft("");
+      if (!isCorrection) {
+        // New visit: clear previous visit-specific extraction/identity state to prevent stale leakage.
+        setFinalText(""); finalRef.current = "";
+        recordRef.current = null; setRecord(null);
+        setMultiVisits([]); setChangedKeys([]); setCorrectionHistory([]);
+        setDangerFlags([]); setTaraLine(""); setSavedResult(null);
+        setEditingCardIdx(null);
+        setSelectedBenId(""); selectedBenIdRef.current = "";
+        setBenConfirmed(false); benConfirmedRef.current = false;
+      }
       correctingRef.current = isCorrection;
       setCorrecting(isCorrection);
       setStatus("listening");
 
       const session = createVoiceSession({
         language: languageRef.current,
-        preferBrowser: mode !== "live",
-        onProvider: setVoiceProvider,
+        // Attempt configured server/Gnani Prisma path first; backend/client falls back
+        // to browser speech recognition only when Prisma is unavailable (reported honestly).
+        preferBrowser: false,
+        onProvider: (provider, reason) => {
+          if (reason === "provider_auth") {
+            setVoiceProvider("Browser Speech Recognition (fallback: Gnani authentication failed)");
+            return;
+          }
+          if (provider === "Browser Speech Recognition" || String(provider || "").startsWith("Browser Speech Recognition")) {
+            setVoiceProvider(String(provider || "").includes("fallback") ? provider : "Browser Speech Recognition (fallback)");
+            return;
+          }
+          if (provider === "Gnani Prisma") {
+            setVoiceProvider("Gnani Prisma v3.0");
+            return;
+          }
+          setVoiceProvider(provider || "");
+        },
         onPartial: (text) => {
           partialRef.current = text || "";
           setPartial(text || "");
@@ -656,7 +967,7 @@ export default function VoiceVisit() {
         showToast(msg, "warn");
       }
     },
-    [mode, t, voiceErrorMessage]
+    [mode, t, voiceErrorMessage, target]
   );
 
   const stopRecording = useCallback(async () => {
@@ -670,6 +981,7 @@ export default function VoiceVisit() {
     setStatus("processing");
     try {
       const { transcript } = await session.stop();
+      speechEndRef.current = performance.now();
       if (!transcript || !transcript.trim()) {
         setStatus("ready");
         showToast(t("vv.errNoSpeech"), "warn");
@@ -687,13 +999,16 @@ export default function VoiceVisit() {
 
   /* ------------------------------ save operations ------------------------------ */
 
-  const doSaveBeneficiary = async (benId) => {
+  const doSaveBeneficiary = async (benId, confirmationOverride = null) => {
+    const confirmation = confirmationOverride || { confirmed: true, method: "ui_fallback", phrase: "Confirm & Save button", confirmed_at: new Date().toISOString() };
     const res = await api.post("/visits", {
       beneficiary_id: benId,
       structured: recordRef.current,
       transcript: finalRef.current,
       language: languageRef.current,
       visit_type: visitType !== "general" ? visitType : undefined,
+      confirmation,
+      corrections: correctionHistory,
     });
     setSavedResult({ ...res, beneficiary_id: benId });
     setStatus("saved");
@@ -709,7 +1024,7 @@ export default function VoiceVisit() {
     setStatus("saved");
   };
 
-  const confirmSaveSingle = async () => {
+  const confirmSaveSingle = async (confirmationOverride = null) => {
     const rec = recordRef.current;
     if (!rec || Object.keys(rec).length === 0) {
       showToast(t("vv.nothingToSave"), "warn");
@@ -727,34 +1042,31 @@ export default function VoiceVisit() {
         await doSaveHousehold(hhId);
         return;
       }
-      let benId = contextRef.current?.id || null;
-      const name = rec.beneficiary_name || contextRef.current?.name || "";
-      if (!benId) {
-        let list = benListRef.current;
-        if (!list.length) {
-          const d = await api.get("/beneficiaries");
-          list = d.beneficiaries || [];
-          benListRef.current = list;
-        }
-        const spoken = name.trim().toLowerCase();
-        const matches = list.filter((b) => {
-          const bn = (b.name || "").toLowerCase();
-          return bn === spoken || bn.split(/\s+/)[0] === spoken || bn.startsWith(spoken + " ") || spoken.startsWith(bn + " ");
-        });
+      /* Resolve the person the WORKER SPOKE ABOUT.
+       *
+       * The previous code preferred `contextRef.current?.id` (whoever
+       * happened to be selected in the context selector) over the spoken
+       * name, so every visit ended up on the same beneficiary — the
+       * "always Lakshmi" bug. The spoken identity now always wins; the
+       * context beneficiary is only used when the utterance names nobody.
+       */
+      const spokenName = (rec.beneficiary_name || "").trim();
+      let benId = null;
+      const name = spokenName || contextRef.current?.name || "";
 
-        if (matches.length === 1) {
-          benId = matches[0].id;
-        } else if (matches.length > 1) {
-          setDisambiguateCandidates({ name, candidates: matches });
-          setSaving(false);
-          return;
-        } else {
-          setRegisterCandidate(name || t("vv.thisBeneficiary"));
-          setSaving(false);
-          return;
-        }
+      // Extraction-first: do NOT auto-search/match by name. Require explicit manual linking/confirmation.
+      const selectedId = selectedBenIdRef.current ? Number(selectedBenIdRef.current) : null;
+      const manuallyLinked = singleIdentityRef.current?.status === "resolved" && singleIdentityRef.current?.matchedBeneficiary?.id;
+      if (manuallyLinked) {
+        benId = Number(singleIdentityRef.current.matchedBeneficiary.id);
+      } else if (selectedId && benConfirmedRef.current) {
+        benId = selectedId;
+      } else {
+        showToast(t("vv.saveNeedsBeneficiary", "Extracted information is preserved. Beneficiary linking is required before saving in the current system."), "warn");
+        setSaving(false);
+        return;
       }
-      await doSaveBeneficiary(benId);
+      await doSaveBeneficiary(benId, confirmationOverride);
     } catch (e) {
       showToast(e.message || t("vv.saveError"), "error");
     } finally {
@@ -762,65 +1074,133 @@ export default function VoiceVisit() {
     }
   };
 
-  /** Batch save for multi-visit recordings (Scenario B & C) */
-  const confirmSaveBatch = async () => {
-    if (!multiVisits.length) return;
+  /**
+   * Save the reviewed multi-visit session.
+   *
+   * Only visits the worker confirmed AND whose identity was resolved are
+   * persisted; the backend reports the rest as skipped instead of writing
+   * them against an arbitrary beneficiary.
+   */
+  const confirmSaveBatch = async (confirmationOverride = null) => {
+    if (!multiVisits.length || !sessionMeta?.id) return;
     setSaving(true);
     try {
       const items = multiVisits.map((v) => ({
+        temp_id: v.temp_id,
         beneficiary_id: v.matchedBeneficiary?.id || null,
-        beneficiary_name: v.beneficiary_name || "",
-        category: safeCategory(v.category),
-        age: v.raw_structured?.age || v.age || null,
-        gender: v.raw_structured?.gender || v.gender || null,
-        create_if_missing: true,
-        structured: v.raw_structured || {},
-        transcript: finalRef.current,
-        language: languageRef.current,
+        status: v.status === "rejected" ? "rejected" : "confirmed",
+        raw_structured: v.raw_structured || {},
       }));
 
-      const payload = {
+      const confirmation = confirmationOverride || { confirmed: true, method: "ui_fallback", phrase: "Confirm & Save button", confirmed_at: new Date().toISOString() };
+      const res = await api.post(`/voice/sessions/${sessionMeta.id}/save`, {
         visits: items,
-        household_visits: [],
-      };
+        household_visits: sessionMeta.householdVisits || [],
+        confirmation,
+      });
 
-      const res = await api.post("/visits/batch", payload);
       setSavedResult({
         total_saved: res.total_saved,
         saved_visits: res.saved_visits,
+        skipped_visits: res.skipped_visits,
         alerts: res.alerts || [],
       });
       setStatus("saved");
       setMultiVisits([]);
-      showToast(`Saved ${res.total_saved} visits successfully!`, "success");
+      sessionIdRef.current = null;
+
+      const skipped = (res.skipped_visits || []).length;
+      if (skipped > 0) {
+        showToast(
+          t("vv.savedWithSkipped", "Saved {n} visits; {m} still need a beneficiary.").replace("{n}", res.total_saved).replace("{m}", skipped),
+          "warn"
+        );
+      } else {
+        showToast(
+          t("vv.savedVisits", "Saved {n} visits successfully!").replace("{n}", res.total_saved),
+          "success"
+        );
+      }
     } catch (e) {
-      showToast(e.message || "Failed to save multi-visit batch", "error");
+      showToast(e.message || t("vv.saveError"), "error");
     } finally {
       setSaving(false);
     }
   };
+  confirmSaveSingleRef.current = confirmSaveSingle;
+  confirmSaveBatchRef.current = confirmSaveBatch;
+
+  function makeRegisterDraft(name) {
+    const r = recordRef.current || {};
+    const symptoms = r.symptoms || r.observations || r.chief_complaint || r.notes || "";
+    return {
+      name: (name || r.beneficiary_name || "").trim(),
+      age: r.age ?? "",
+      gender: r.gender || "",
+      category: safeCategory(r.category),
+      village: r.village || user?.phc || "",
+      household_id: selectedHhRef.current || r.household_id || contextRef.current?.household_id || "",
+      symptoms: Array.isArray(symptoms) ? symptoms.join(", ") : String(symptoms || ""),
+      visit_date: r.visit_date || new Date().toISOString().slice(0, 10),
+    };
+  }
 
   const registerAndSaveSingle = async () => {
-    if (!registerCandidate) return;
+    const draft = registerCandidate && typeof registerCandidate === "object" ? registerCandidate : makeRegisterDraft(registerCandidate);
+    if (!draft?.name?.trim()) {
+      showToast(t("vv.registerNeedName", "Beneficiary name is required before registration."), "warn");
+      return;
+    }
     setSaving(true);
     try {
-      const d = await api.post("/beneficiaries", {
-        name: registerCandidate,
-        category: safeCategory(recordRef.current?.category),
-        age: recordRef.current?.age || undefined,
-        gender: recordRef.current?.gender || undefined,
-        village: user?.phc || undefined,
-      });
+      // Check existing beneficiaries by name to avoid duplicates.
+      const existing = await api.get(`/beneficiaries?search=${encodeURIComponent(draft.name.trim())}`).catch(() => ({ beneficiaries: [] }));
+      const nameLower = draft.name.trim().toLowerCase();
+      const exact = (existing.beneficiaries || []).filter((b) => String(b.name || "").trim().toLowerCase() === nameLower);
+      if (exact.length === 1) {
+        benListRef.current = [...benListRef.current.filter((x) => x.id !== exact[0].id), exact[0]];
+        await doSaveBeneficiary(exact[0].id);
+        showToast(t("vv.matchedExisting", "Matched existing beneficiary and saved visit."), "success");
+        return;
+      }
+      if (exact.length > 1) {
+        setDisambiguateCandidates({ name: draft.name.trim(), candidates: exact });
+        setSaving(false);
+        return;
+      }
+
+      const payload = {
+        name: draft.name.trim(),
+        category: safeCategory(draft.category),
+        age: draft.age === "" || draft.age === null || draft.age === undefined ? undefined : Number(draft.age),
+        gender: (draft.gender || "").trim() || undefined,
+        village: (draft.village || "").trim() || undefined,
+        household_id: draft.household_id ? Number(draft.household_id) : undefined,
+        registration_notes: draft.symptoms ? `Voice registration: ${draft.symptoms}` : "Registered from voice visit",
+      };
+      const d = await api.post("/beneficiaries", payload);
       const b = d?.beneficiary || d?.beneficiaries?.[0] || d;
       if (!b?.id) throw new Error(t("vv.registerError", "Could not register the new beneficiary."));
-      benListRef.current = [...benListRef.current, b];
+      benListRef.current = [...benListRef.current.filter((x) => x.id !== b.id), b];
       await doSaveBeneficiary(b.id);
-      showToast(t("vv.registeredSaved", "{name}").replace("{name}", registerCandidate), "success");
+      showToast(t("vv.registeredSaved", "{name} registered and visit saved.").replace("{name}", draft.name.trim()), "success");
     } catch (e) {
       showToast(e.message || t("vv.registerError"), "error");
     } finally {
       setSaving(false);
     }
+  };
+
+  const keepAsUnassignedDraft = async () => {
+    const draftName = registerCandidate && typeof registerCandidate === "object" ? registerCandidate.name : registerCandidate;
+    setRegisterCandidate(null);
+    setDisambiguateCandidates(null);
+    setSingleIdentity(null); setEditingTranscript(false); setTranscriptDraft("");
+    setTaraLine(t("vv.keptAsDraftMsg", "Kept as unassigned draft. Transcript preserved; no beneficiary was created or linked."));
+    showToast(t("vv.keptAsDraftToast", "Kept as unassigned draft. Transcript preserved; no beneficiary was linked."), "info");
+    console.info("[voice] kept as unassigned draft", { name: draftName, sessionId: sessionMetaRef.current?.id || null });
+    // Keep record/transcript visible for review; do not save against any beneficiary.
+    setStatus(recordRef.current ? "confirm" : "ready");
   };
 
   const resetAll = () => {
@@ -835,14 +1215,77 @@ export default function VoiceVisit() {
     setRecord(null);
     setMultiVisits([]);
     setChangedKeys([]);
+    setCorrectionHistory([]);
     setDangerFlags([]);
     setTaraLine("");
     setSavedResult(null);
     setRegisterCandidate(null);
     setDisambiguateCandidates(null);
+    setSingleIdentity(null); setEditingTranscript(false); setTranscriptDraft("");
     setEditingCardIdx(null);
     setMicError(null);
     setStatus("ready");
+  };
+
+  const applyEditedTranscript = async () => {
+    const txt = (transcriptDraft || "").trim();
+    if (!txt) return;
+    setEditingTranscript(false);
+    setFinalText(txt); finalRef.current = txt;
+    setMicError(null);
+    setStatus("processing");
+    try {
+      const clientSessionId = sessionIdRef.current || `s-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+      sessionIdRef.current = clientSessionId;
+      const session = await api.post("/voice/sessions/extract-direct", {
+        client_session_id: clientSessionId,
+        language: languageRef.current,
+        transcript: txt,
+        mode,
+      });
+      const visits = session.visits || [];
+      const detectedScenario = session.scenario || "single_beneficiary";
+      setScenarioType(detectedScenario);
+      setDangerFlags(session.danger_flags || []);
+      setSessionMeta({ id: session.id, scenario: detectedScenario, householdVisits: session.household_visits || [], corrections: session.corrections || [] });
+      const processedVisits = visits.map((v) => ({ ...v, temp_id: v.temp_id || v.visit_id, matchedBeneficiary: null, candidateMatches: [], needsRegistration: false, raw_structured: v.raw_structured || {} }));
+      if (processedVisits.length > 1) {
+        setMultiVisits(processedVisits); setRecord(null); recordRef.current = null;
+        const readLine = formatTaraHeardTranscript(txt);
+        setTaraLine(readLine); setStatus("speaking"); await speakWithMetrics(readLine); setStatus("confirm"); return;
+      }
+      const singleVisit = processedVisits[0];
+      const incoming = singleVisit ? { ...(singleVisit.raw_structured || {}) } : {};
+      const pdRaw = incoming.personal_details && typeof incoming.personal_details === "object" ? incoming.personal_details : {};
+      const pdTop = singleVisit?.personal_details && typeof singleVisit.personal_details === "object" ? singleVisit.personal_details : {};
+      const pd = { ...pdRaw, ...Object.fromEntries(Object.entries(pdTop).filter(([,v]) => v !== null && v !== undefined && v !== "")) };
+      const measRaw = incoming.measurements && typeof incoming.measurements === "object" ? incoming.measurements : {};
+      const measTop = singleVisit?.measurements && typeof singleVisit.measurements === "object" ? singleVisit.measurements : {};
+      const meas = { ...measRaw, ...Object.fromEntries(Object.entries(measTop).filter(([,v]) => v !== null && v !== undefined && v !== "")) };
+      const spokenNameCandidate = (singleVisit?.beneficiary_name || incoming.beneficiary_name || pd.name || incoming.name || singleVisit?.raw_structured?.beneficiary_name || singleVisit?.raw_structured?.name || singleVisit?.raw_structured?.personal_details?.name || "");
+      const normalizedSpokenName = selectBeneficiaryName(spokenNameCandidate);
+      if (normalizedSpokenName) {
+        incoming.beneficiary_name = normalizedSpokenName;
+        incoming.personal_details = { ...(incoming.personal_details && typeof incoming.personal_details === "object" ? incoming.personal_details : {}), ...pd, name: normalizedSpokenName };
+      }
+      if (incoming.age == null && pd.age != null) incoming.age = pd.age;
+      if (!incoming.gender && pd.gender) incoming.gender = pd.gender;
+      if (!incoming.category && (singleVisit?.category || incoming.category)) incoming.category = singleVisit?.category || incoming.category;
+      Object.entries(meas).forEach(([k, v]) => { if (incoming[k] == null && v !== null && v !== "") incoming[k] = v; });
+      const prev = recordRef.current ? { ...recordRef.current } : null;
+      const merged = mergeExtractedRecord(prev, incoming, { correcting: correctingRef.current });
+      recordRef.current = merged; setRecord(merged);
+      setChangedKeys(correctingRef.current ? Object.keys(incoming) : []);
+      if (!correctingRef.current) {
+        const spokenName = (merged.beneficiary_name || singleVisit?.beneficiary_name || "").trim();
+        setSelectedBenId(""); selectedBenIdRef.current = ""; setBenConfirmed(false); benConfirmedRef.current = false;
+        setSingleIdentity({ status: spokenName ? "extracted_unlinked" : "name_missing", matchedBeneficiary: null, candidates: [], reason: spokenName ? "Name extracted from transcript. Link beneficiary manually before saving." : "Beneficiary name not extracted.", spokenName });
+      }
+      const line = formatTaraHeardTranscript(txt);
+      setTaraLine(line); setStatus("speaking"); await speakWithMetrics(line); setStatus("confirm");
+    } catch (e) {
+      setMicError(e?.message || "Extraction failed"); setStatus("ready");
+    }
   };
 
   const switchTarget = (next) => {
@@ -880,6 +1323,13 @@ export default function VoiceVisit() {
   const listening = status === "listening";
   const isHhTarget = target === "household";
   const savedHouseholdId = savedResult?.household_id || savedResult?.visit?.household_id;
+  const ttfaMedian = ttfaHistory.length
+    ? (() => {
+        const s = [...ttfaHistory].sort((a, b) => a - b);
+        const mid = Math.floor(s.length / 2);
+        return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
+      })()
+    : null;
 
   return (
     <div className="space-y-5">
@@ -930,98 +1380,33 @@ export default function VoiceVisit() {
                 </select>
               </label>
               <span className="text-[0.68rem] font-semibold text-white/55" aria-live="polite">
-                {voiceProvider || t("voice.providerOnRecord", "Speech provider selected on Record")}
+                {voiceProvider || t("voice.providerOnRecord", "Speech provider selected when recording starts")}
               </span>
-            </div>
-
-            {/* target selector: beneficiary or household */}
-            <div className="flex w-full flex-wrap items-center justify-center gap-2">
-              <button
-                onClick={() => switchTarget("beneficiary")}
-                className={[
-                  "chip px-3.5 py-1.5 transition-colors",
-                  !isHhTarget ? "bg-mint text-teal-deep" : "bg-white/10 text-white/70 hover:bg-white/20",
-                ].join(" ")}
-              >
-                <User size={13} /> {t("vv.target.beneficiary")}
-              </button>
-              <button
-                onClick={() => switchTarget("household")}
-                className={[
-                  "chip px-3.5 py-1.5 transition-colors",
-                  isHhTarget ? "bg-mint text-teal-deep" : "bg-white/10 text-white/70 hover:bg-white/20",
-                ].join(" ")}
-              >
-                <HomeIcon size={13} /> {t("vv.target.household")}
-              </button>
-            </div>
-
-            {/* context selector */}
-            <div className="w-full">
-              {isHhTarget ? (
-                <select
-                  value={selectedHhId}
-                  onChange={(e) => setSelectedHhId(e.target.value)}
-                  className="mx-auto block w-full max-w-xs rounded-2xl border border-white/15 bg-white/10 px-4 py-2.5 text-center text-sm font-semibold text-white outline-none [&>option]:text-teal-deep"
-                >
-                  <option value="">{t("vv.chooseHousehold")}</option>
-                  {hhList.map((h) => (
-                    <option key={h.id} value={h.id}>
-                      {h.village} — {h.qr_id}
-                    </option>
-                  ))}
-                </select>
-              ) : contextBen ? (
-                <div className="flex items-center justify-center gap-2.5">
-                  <span className="chip max-w-full bg-mint/15 px-3.5 py-1.5 text-mint">
-                    <User size={12} />
-                    <span className="truncate">{contextBen.name}</span>
-                  </span>
-                  <button
-                    onClick={() => setSelectedBenId("")}
-                    aria-label={t("vv.clearBeneficiary")}
-                    className="rounded-full bg-white/10 p-1.5 text-white/60 transition-colors hover:text-white"
-                  >
-                    <X size={13} />
-                  </button>
-                </div>
-              ) : (
-                <select
-                  value={selectedBenId}
-                  onChange={(e) => setSelectedBenId(e.target.value)}
-                  className="mx-auto block w-full max-w-xs rounded-2xl border border-white/15 bg-white/10 px-4 py-2.5 text-center text-sm font-semibold text-white outline-none [&>option]:text-teal-deep"
-                >
-                  <option value="">{t("vv.extractName")}</option>
-                  {benList.map((b) => (
-                    <option key={b.id} value={b.id}>
-                      {b.name} — {b.village || b.category}
-                    </option>
-                  ))}
-                </select>
+              {(ttfaMs != null || ttfaMedian != null) && (
+                <span className="text-[0.68rem] font-semibold text-mint/85" aria-live="polite">
+                  TTFA {ttfaMs != null ? `${ttfaMs}ms` : "—"} · median {ttfaMedian != null ? `${ttfaMedian}ms` : "—"}
+                </span>
               )}
             </div>
 
-            {/* visit type (beneficiary visits only) */}
-            {!isHhTarget && (
-              <div className="flex w-full flex-wrap items-center justify-center gap-2">
-                {[
-                  { key: "general", icon: Waves },
-                  { key: "nutrition", icon: HeartPulse },
-                  { key: "community", icon: Activity },
-                ].map(({ key, icon: Icon }) => (
-                  <button
-                    key={key}
-                    onClick={() => setVisitType(key)}
-                    className={[
-                      "chip px-3.5 py-1.5 transition-colors",
-                      visitType === key ? "bg-mint text-teal-deep" : "bg-white/10 text-white/70 hover:bg-white/20",
-                    ].join(" ")}
-                  >
-                    <Icon size={13} /> {t(`vv.type.${key}`)}
-                  </button>
-                ))}
-              </div>
-            )}
+            <div className="w-full text-center">
+              <p className="text-sm font-semibold text-white/80">{t("vv.voiceFirstHint","Tap the mic and speak naturally. Tara will identify the beneficiary from your speech.")}</p>
+              <button type="button" onClick={()=>setShowManualLink(v=>!v)} className="mt-2 text-[11px] font-bold text-white/45 underline-offset-2 hover:text-white/70 hover:underline">
+                {showManualLink ? t("vv.hideManualLink","Hide manual link") : t("vv.manualLink","Optional: link beneficiary manually")}
+              </button>
+              {showManualLink && (
+                <div className="mt-3 rounded-2xl border border-white/10 bg-white/5 p-3 text-left space-y-2">
+                  <select value={selectedHhId} onChange={(e)=>{setSelectedHhId(e.target.value); setSelectedBenId("");}} className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm text-white outline-none [&>option]:text-teal-deep">
+                    <option value="">{t("vv.allHouseholds","All households")}</option>
+                    {hhList.map(h => <option key={h.id} value={h.id}>{h.village} - {h.qr_id}</option>)}
+                  </select>
+                  <select value={selectedBenId} onChange={(e)=>setSelectedBenId(e.target.value)} className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm text-white outline-none [&>option]:text-teal-deep">
+                    <option value="">{t("vv.optionalBeneficiary","Optional beneficiary link")}</option>
+                    {benList.filter(b=>!selectedHhId || String(b.household_id||"")===String(selectedHhId)).map(b => <option key={b.id} value={b.id}>{b.name} - {b.village || b.category}</option>)}
+                  </select>
+                </div>
+              )}
+            </div>
 
             {/* mic button + rings + waveform */}
             <div className="relative flex flex-col items-center gap-5 py-2">
@@ -1074,6 +1459,10 @@ export default function VoiceVisit() {
               <p className="text-center text-xs font-semibold text-white/55">
                 {listening
                   ? t("vv.hint.listening")
+                  : status === "processing"
+                  ? t("vv.hint.processing", "Understanding your request...")
+                  : status === "speaking"
+                  ? t("vv.hint.speaking", "Tara is speaking...")
                   : status === "confirm"
                   ? t("vv.hint.confirm")
                   : t("vv.hint.tap")}
@@ -1085,8 +1474,17 @@ export default function VoiceVisit() {
               <div className="w-full rounded-2xl border border-coral/40 bg-coral/10 px-4 py-3.5">
                 <p className="flex items-start gap-2 text-xs font-semibold leading-relaxed text-coral">
                   <CircleAlert size={15} className="mt-0.5 shrink-0" />
-                  {micError}
+                  <span className="flex-1">{micError}</span>
                 </p>
+                {finalText && status === "ready" && (
+                  <button
+                    type="button"
+                    onClick={() => { setMicError(null); handleFinal(finalText); }}
+                    className="mt-3 rounded-full bg-white/10 px-3 py-1.5 text-[11px] font-extrabold text-white hover:bg-white/20"
+                  >
+                    {t("vv.retryExtraction", "Retry extraction")}
+                  </button>
+                )}
               </div>
             )}
 
@@ -1126,6 +1524,54 @@ export default function VoiceVisit() {
                     <Sparkles size={12} /> {t("vv.taraSays")}
                   </p>
                   <p className="text-sm font-semibold leading-relaxed text-white/90">{taraLine}</p>
+                  <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] font-bold">
+                    <span className="text-white/60">
+                      {playbackStatus === "preparing" ? t("vv.playbackPreparing", "Preparing audio…")
+                        : playbackStatus === "speaking" ? t("vv.playbackSpeaking", "Speaking…")
+                        : playbackStatus === "paused" ? t("vv.playbackPaused", "Paused")
+                        : playbackStatus === "completed" ? t("vv.playbackCompleted", "Playback completed")
+                        : playbackStatus === "blocked" ? t("vv.playbackBlocked", "Autoplay blocked")
+                        : playbackStatus === "failed" ? t("vv.playbackFailedShort", "Playback failed")
+                        : t("vv.playbackReady", "Audio readback")}
+                    </span>
+                    {playbackProvider ? (
+                      <span className="rounded-full bg-white/10 px-2 py-0.5 text-white/50">
+                        {/gnani|timbre/i.test(playbackProvider) ? "Gnani Timbre" : t("vv.browserFallback", "Browser fallback")}
+                      </span>
+                    ) : null}
+                    {autoplayBlocked ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setPlaybackStatus("preparing");
+                          const r = await retryPendingPlayback();
+                          if (r?.provider) setPlaybackProvider(r.provider);
+                          if (r?.ended) { setAutoplayBlocked(false); setPlaybackError(""); setPlaybackStatus("completed"); }
+                          else if (r?.autoplayBlocked) { setAutoplayBlocked(true); setPlaybackStatus("blocked"); }
+                          else if (r?.error) { setPlaybackError(t("vv.playbackFailed", "Tara audio could not be played. You can replay or continue with the on-screen text.")); setPlaybackStatus("failed"); }
+                        }}
+                        className="rounded-full bg-mint px-3 py-1 text-teal-deep"
+                      >
+                        {t("vv.tapToHearBtn", "Tap to hear Tara")}
+                      </button>
+                    ) : (
+                      <>
+                        {playbackStatus === "speaking" ? (
+                          <button type="button" onClick={() => { pauseSpeaking(); setPlaybackStatus("paused"); }} className="rounded-full bg-white/10 px-2.5 py-1 text-white/80 hover:bg-white/20">{t("vv.pause", "Pause")}</button>
+                        ) : playbackStatus === "paused" ? (
+                          <button type="button" onClick={async () => { const r = resumeSpeaking(); if (r && typeof r.then === "function") { try { await r; } catch {} } setPlaybackStatus("speaking"); }} className="rounded-full bg-white/10 px-2.5 py-1 text-white/80 hover:bg-white/20">{t("vv.resume", "Resume")}</button>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => { if (taraLine) { setStatus("speaking"); speakWithMetrics(taraLine).finally(() => setStatus((s)=>s==="speaking"?"confirm":s)); } }}
+                          className="rounded-full bg-white/10 px-2.5 py-1 text-white/80 hover:bg-white/20"
+                        >
+                          {playbackError ? t("vv.retryPlayback", "Retry playback") : t("vv.replay", "Replay")}
+                        </button>
+                      </>
+                    )}
+                    {playbackError ? <span className="text-coral">{playbackError}</span> : null}
+                  </div>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -1178,7 +1624,7 @@ export default function VoiceVisit() {
                     onClick={() => {
                       const name = disambiguateCandidates.name;
                       setDisambiguateCandidates(null);
-                      setRegisterCandidate(name);
+                      setRegisterCandidate(makeRegisterDraft(name));
                     }}
                     className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-white/20 px-3 py-2 text-xs font-bold text-mint hover:bg-white/10"
                   >
@@ -1190,59 +1636,92 @@ export default function VoiceVisit() {
 
             {/* confirm actions for single record */}
             <AnimatePresence>
-              {status === "confirm" && !multiVisits.length && (
+              {status === "confirm" && !multiVisits.length && !registerCandidate && !disambiguateCandidates && (
                 <motion.div
                   initial={{ opacity: 0, y: 12 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
                   className="flex w-full flex-col gap-2.5 sm:flex-row"
                 >
-                  <button
-                    onClick={confirmSaveSingle}
-                    disabled={saving}
-                    className="btn-mint flex flex-1 items-center justify-center gap-2 px-5 py-3 text-sm disabled:opacity-60"
-                  >
-                    {saving ? <Loader2 size={16} className="animate-spin" /> : <BadgeCheck size={16} strokeWidth={2.4} />}
-                    {saving ? t("vv.saving") : t("voice.confirmSave")}
-                  </button>
-                  <button
-                    onClick={() => startListening(true)}
-                    className="flex flex-1 items-center justify-center gap-2 rounded-full border border-white/25 px-5 py-3 text-sm font-bold text-white transition-colors hover:bg-white/10"
-                  >
-                    <Mic size={16} strokeWidth={2.4} /> {t("voice.correctField")}
-                  </button>
-                  <button
-                    onClick={resetAll}
-                    className="flex items-center justify-center gap-2 rounded-full px-4 py-3 text-sm font-bold text-white/50 transition-colors hover:text-white"
-                  >
-                    <RotateCcw size={15} /> {t("voice.discard")}
-                  </button>
+                  <div className="flex w-full flex-col gap-2">
+                    {editingTranscript && (
+                      <div className="rounded-2xl border border-white/15 bg-white/10 p-3">
+                        <p className="text-xs font-bold text-mint mb-2">Edit transcript</p>
+                        <textarea value={transcriptDraft} onChange={(e)=>setTranscriptDraft(e.target.value)} className="w-full rounded-xl bg-white/10 border border-white/15 p-2 text-sm text-white min-h-[72px]" />
+                        <div className="mt-2 flex gap-2">
+                          <button onClick={applyEditedTranscript} className="btn-mint px-3 py-1.5 text-xs">Apply & re-check</button>
+                          <button onClick={()=>setEditingTranscript(false)} className="rounded-full border border-white/20 px-3 py-1.5 text-xs font-bold text-white/80">Cancel</button>
+                        </div>
+                      </div>
+                    )}
+                    <div className="flex flex-col gap-2.5 sm:flex-row">
+                      <button
+                        onClick={confirmSaveSingle}
+                        disabled={saving}
+                        className="btn-mint flex flex-1 items-center justify-center gap-2 px-5 py-3 text-sm disabled:opacity-60"
+                      >
+                        {saving ? <Loader2 size={16} className="animate-spin" /> : <BadgeCheck size={16} strokeWidth={2.4} />}
+                        {saving ? t("vv.saving") : "Confirm"}
+                      </button>
+                      <button
+                        onClick={() => startListening(true)}
+                        className="flex flex-1 items-center justify-center gap-2 rounded-full border border-white/25 px-5 py-3 text-sm font-bold text-white transition-colors hover:bg-white/10"
+                      >
+                        <Mic size={16} strokeWidth={2.4} /> Correct by voice
+                      </button>
+                      <button
+                        onClick={() => { setTranscriptDraft(finalRef.current || finalText || ""); setEditingTranscript(true); }}
+                        className="flex flex-1 items-center justify-center gap-2 rounded-full border border-white/25 px-5 py-3 text-sm font-bold text-white transition-colors hover:bg-white/10"
+                      >
+                        <Edit3 size={16} strokeWidth={2.4} /> Edit transcript
+                      </button>
+                      <button
+                        onClick={resetAll}
+                        className="flex items-center justify-center gap-2 rounded-full px-4 py-3 text-sm font-bold text-white/50 transition-colors hover:text-white"
+                      >
+                        <RotateCcw size={15} /> Discard
+                      </button>
+                    </div>
+                  </div>
                 </motion.div>
               )}
             </AnimatePresence>
 
             {/* register-new inline action */}
             <AnimatePresence>
-              {registerCandidate && status !== "saved" && (
+              {registerCandidate && status !== "saved" && (() => {
+                const draft = typeof registerCandidate === "object" ? registerCandidate : makeRegisterDraft(registerCandidate);
+                const setDraft = (patch) => setRegisterCandidate({ ...draft, ...patch });
+                return (
                 <motion.div
                   initial={{ opacity: 0, y: 12 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
-                  className="w-full rounded-2xl border border-lavender/40 bg-lavender/10 px-5 py-4 text-center"
+                  className="w-full rounded-2xl border border-lavender/40 bg-lavender/10 px-5 py-4 text-left"
                 >
-                  <p className="text-sm font-semibold text-white/85">
-                    {t("vv.registerCandidate", "“{name}”").replace("{name}", registerCandidate)}
-                  </p>
-                  <button
-                    onClick={registerAndSaveSingle}
-                    disabled={saving}
-                    className="btn-mint mt-3 flex w-full items-center justify-center gap-2 px-4 py-2.5 text-sm disabled:opacity-60"
-                  >
-                    {saving ? <Loader2 size={15} className="animate-spin" /> : <UserPlus size={15} strokeWidth={2.4} />}
-                    {t("vv.registerAndSave").replace("{name}", registerCandidate)}
-                  </button>
+                  <p className="text-sm font-extrabold text-mint">{t("vv.newBeneficiaryDetected", "New beneficiary detected!")}</p>
+                  <p className="mt-1 text-[11px] text-white/65">{t("vv.newBeneficiaryHint", "Review extracted details. Register only after confirmation, or keep as unassigned draft.")}</p>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    <label className="text-[11px] text-white/60">{t("field.beneficiary","Name")}<input className="mt-1 w-full rounded-lg border border-white/15 bg-white/10 px-2 py-1.5 text-sm text-white" value={draft.name || ""} onChange={(e)=>setDraft({name:e.target.value})} /></label>
+                    <label className="text-[11px] text-white/60">{t("field.age","Age")}<input className="mt-1 w-full rounded-lg border border-white/15 bg-white/10 px-2 py-1.5 text-sm text-white" value={draft.age ?? ""} onChange={(e)=>setDraft({age:e.target.value})} /></label>
+                    <label className="text-[11px] text-white/60">{t("field.gender","Gender")}<input className="mt-1 w-full rounded-lg border border-white/15 bg-white/10 px-2 py-1.5 text-sm text-white" value={draft.gender || ""} onChange={(e)=>setDraft({gender:e.target.value})} /></label>
+                    <label className="text-[11px] text-white/60">{t("field.category","Category")}<input className="mt-1 w-full rounded-lg border border-white/15 bg-white/10 px-2 py-1.5 text-sm text-white" value={draft.category || ""} onChange={(e)=>setDraft({category:e.target.value})} /></label>
+                    <label className="text-[11px] text-white/60">{t("field.village","Village/Household")}<input className="mt-1 w-full rounded-lg border border-white/15 bg-white/10 px-2 py-1.5 text-sm text-white" value={draft.village || ""} onChange={(e)=>setDraft({village:e.target.value})} /></label>
+                    <label className="text-[11px] text-white/60">{t("field.visitDate","Visit date")}<input className="mt-1 w-full rounded-lg border border-white/15 bg-white/10 px-2 py-1.5 text-sm text-white" value={draft.visit_date || ""} onChange={(e)=>setDraft({visit_date:e.target.value})} /></label>
+                  </div>
+                  <label className="mt-2 block text-[11px] text-white/60">{t("vv.symptomsHealthInfo","Symptoms / health info")}<input className="mt-1 w-full rounded-lg border border-white/15 bg-white/10 px-2 py-1.5 text-sm text-white" value={draft.symptoms || ""} onChange={(e)=>setDraft({symptoms:e.target.value})} /></label>
+                  <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                    <button onClick={registerAndSaveSingle} disabled={saving} className="btn-mint flex flex-1 items-center justify-center gap-2 px-4 py-2.5 text-sm disabled:opacity-60">
+                      {saving ? <Loader2 size={15} className="animate-spin" /> : <UserPlus size={15} strokeWidth={2.4} />}
+                      {t("vv.registerAndSaveAction", "Register New Beneficiary")}
+                    </button>
+                    <button onClick={keepAsUnassignedDraft} disabled={saving} className="flex flex-1 items-center justify-center gap-2 rounded-full border border-white/20 px-4 py-2.5 text-sm font-bold text-white/80 hover:bg-white/10 disabled:opacity-60">
+                      {t("vv.keepAsDraft", "Keep as Unassigned Draft")}
+                    </button>
+                  </div>
                 </motion.div>
-              )}
+                );
+              })()}
             </AnimatePresence>
 
             {/* success panel */}
@@ -1267,15 +1746,27 @@ export default function VoiceVisit() {
                       ))}
                     </div>
                   )}
-                  {(savedResult.alerts || []).length > 0 && (
+                  {(savedResult.alerts || []).length > 0 ? (
                     <div className="mt-3 rounded-xl bg-coral/10 px-3.5 py-3">
+                      <p className="text-xs font-extrabold text-coral mb-2">
+                        Visit saved successfully. {(savedResult.alerts || []).length} danger alert{(savedResult.alerts || []).length === 1 ? "" : "s"} generated.
+                      </p>
                       {savedResult.alerts.map((a, i) => (
                         <p key={i} className="flex items-start gap-2 text-xs font-bold text-coral">
                           <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-                          "{a.phrase}" — {a.message || t("alerts.refer")}
+                          "{a.phrase || a.triggering_phrase || a.detected_danger_sign}" - {a.message || t("alerts.refer")}
                         </p>
                       ))}
                     </div>
+                  ) : (
+                    <p className="mt-3 text-xs font-semibold text-teal-deep/65">
+                      Visit saved successfully. No danger signs detected by the configured rules.
+                    </p>
+                  )}
+                  {savedResult.alert_generation_error && (
+                    <p className="mt-3 rounded-xl bg-amber-50 px-3.5 py-2.5 text-xs font-bold text-amber-800">
+                      Visit saved, but danger-alert processing failed. Please retry or contact support. {String(savedResult.alert_generation_error)}
+                    </p>
                   )}
                   {savedResult.follow_up?.due_date && (
                     <p className="mt-3 text-xs font-semibold text-teal-deep/60">
@@ -1329,10 +1820,12 @@ export default function VoiceVisit() {
                     <div>
                       <p className="text-xs font-extrabold">
                         {scenarioType === "household_members"
-                          ? `Household Members (${multiVisits.length})`
-                          : `Multiple Beneficiaries (${multiVisits.length})`}
+                          ? t("vv.householdMembers", "Household Members ({n})").replace("{n}", multiVisits.length)
+                          : t("vv.multipleBeneficiaries", "Multiple Beneficiaries ({n})").replace("{n}", multiVisits.length)}
                       </p>
-                      <p className="text-[0.65rem] text-white/60">Independent records extracted in one session</p>
+                      <p className="text-[0.65rem] text-white/60">
+                        {t("vv.independentRecords", "Independent records extracted in one session")}
+                      </p>
                     </div>
                   </div>
                   <button
@@ -1359,25 +1852,34 @@ export default function VoiceVisit() {
                         className="rounded-2xl bg-white p-4 text-teal-deep shadow-soft"
                       >
                         <div className="flex items-start justify-between gap-2 border-b border-teal-deep/10 pb-2">
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-sm font-extrabold text-teal-deep">{v.beneficiary_name}</span>
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-sm font-extrabold text-teal-deep">
+                                {v.beneficiary_name || t("vv.unnamedVisit", "Unnamed visit")}
+                              </span>
                               <span className="chip bg-mint/20 text-[0.65rem] font-bold text-teal-deep">
                                 {v.category || "general"}
                               </span>
+                              <IdentityBadge visit={v} />
                             </div>
                             <p className="mt-0.5 text-[0.68rem] text-teal-deep/55">
-                              {v.relation ? `Relation: ${v.relation} · ` : ""}
-                              {v.gender ? `Gender: ${v.gender} · ` : ""}
-                              {v.household_id ? `Household: ${v.household_id}` : ""}
+                              {v.personal_details?.relation ? `${t("vv.relation", "Relation")}: ${v.personal_details.relation} · ` : ""}
+                              {v.personal_details?.gender ? `${t("vv.gender", "Gender")}: ${v.personal_details.gender} · ` : ""}
+                              {v.personal_details?.age != null ? `${t("vv.age", "Age")}: ${v.personal_details.age} · ` : ""}
+                              {v.household_label || v.household_id || ""}
                             </p>
+                            {v.identity_reason && (
+                              <p className="mt-1 text-[0.65rem] font-medium text-teal-deep/50">
+                                {v.identity_reason}
+                              </p>
+                            )}
                           </div>
 
                           <div className="flex items-center gap-1">
                             <button
                               onClick={() => setEditingCardIdx(isEditing ? null : idx)}
                               className="rounded-lg p-1.5 text-teal-deep/50 hover:bg-teal-deep/5 hover:text-teal-deep"
-                              title="Edit fields"
+                              title={t("vv.editFields", "Edit fields")}
                             >
                               <Edit3 size={13} />
                             </button>
@@ -1388,7 +1890,7 @@ export default function VoiceVisit() {
                                 if (next.length === 0) resetAll();
                               }}
                               className="rounded-lg p-1.5 text-coral/70 hover:bg-coral/10 hover:text-coral"
-                              title="Discard this visit"
+                              title={t("vv.discardThisVisit", "Discard this visit")}
                             >
                               <Trash2 size={13} />
                             </button>
@@ -1455,17 +1957,49 @@ export default function VoiceVisit() {
                   </span>
                 </div>
 
-                {fields.length === 0 ? (
-                  <div className="rounded-2xl bg-ivory/80 px-4 py-8 text-center">
-                    <Waves size={26} className="mx-auto mb-2 text-teal-deep/25" />
-                    <p className="text-xs font-semibold leading-relaxed text-teal-deep/45">
-                      {correcting ? t("vv.previewHintCorrection") : t("vv.previewHint")}
-                    </p>
-                  </div>
-                ) : (
+                {(() => {
+                  const hasName = !!selectBeneficiaryName(record?.beneficiary_name, record?.personal_details?.name, record?.raw_structured?.beneficiary_name, record?.raw_structured?.name, record?.name);
+                  const showIdentityNotice = !hasName && !isHhTarget && (fields.length > 0 || status === "confirm");
+                  if (fields.length === 0 && !showIdentityNotice) {
+                    return (
+                      <div className="rounded-2xl bg-ivory/80 px-4 py-8 text-center">
+                        <Waves size={26} className="mx-auto mb-2 text-teal-deep/25" />
+                        <p className="text-xs font-semibold leading-relaxed text-teal-deep/45">
+                          {correcting ? t("vv.previewHintCorrection") : t("vv.previewHint")}
+                        </p>
+                      </div>
+                    );
+                  }
+                  const cat = String(record?.category ?? "").toLowerCase();
+                  const relevant = (id) => {
+                    if (id === "identity" || id === "followup") return true;
+                    if (id === "sanitation") return isHhTarget || cat === "household" || ["water_source","toilet_available","waste_disposal","drainage","stagnant_water"].some(k => record?.[k] !== undefined);
+                    if (id === "maternal") return cat === "pregnancy" || record?.weeks_pregnant != null || record?.ifa_tablets != null || record?.td_vaccine != null;
+                    if (id === "child") return ["newborn","child","immunisation"].includes(cat) || record?.vaccine_name != null || record?.temperature != null || record?.feeding != null || record?.jaundice != null;
+                    if (id === "elderly") return cat === "elderly" || record?.mobility != null || record?.blood_sugar != null;
+                    if (id === "measurements") return ["weight_kg","height_cm","hemoglobin","blood_sugar"].some(k => record?.[k] != null);
+                    return true;
+                  };
+                  return (
                   <div className="space-y-4 max-h-[580px] overflow-y-auto pr-1">
-                    {SECTION_DEFS.map((sec) => {
-                      const secFields = fields.filter((f) => sec.keys.includes(f.key));
+
+                    {SECTION_DEFS.filter(sec => relevant(sec.id)).map((sec) => {
+                      let secFields = fields.filter((f) => sec.keys.includes(f.key));
+                      if (sec.id === "identity" && !isHhTarget) {
+                        const displayName = selectBeneficiaryName(record?.beneficiary_name, record?.personal_details?.name, record?.raw_structured?.beneficiary_name, record?.raw_structured?.name, record?.name);
+                        if (!displayName && showIdentityNotice) {
+                          secFields = [{ key: "beneficiary_name", label: "field.beneficiary", icon: User, value: t("vv.nameNotMentionedShort", "Name not mentioned"), render: (v) => v }, ...secFields];
+                        } else if (displayName && !secFields.some((f) => f.key === "beneficiary_name")) {
+                          secFields = [{ key: "beneficiary_name", label: "field.beneficiary", icon: User, value: displayName, render: (v) => v }, ...secFields];
+                        } else if (displayName) {
+                          secFields = secFields.map((f) => f.key === "beneficiary_name" ? { ...f, value: displayName } : f);
+                        }
+                      }
+                      if (sec.id !== "identity") {
+                        secFields = secFields.filter((f) => f.key !== "beneficiary_name" && !(f.key === "age" && sec.id !== "identity"));
+                      }
+                      // avoid showing same measurement duplicated confusingly across maternal/child/elderly when not primary
+                      if (sec.id === "child" && ["pregnancy","elderly"].includes(cat)) secFields = secFields.filter(f => ["vaccine_name","temperature","feeding","jaundice"].includes(f.key));
                       if (secFields.length === 0) return null;
                       const SecIcon = sec.icon;
 
@@ -1496,7 +2030,13 @@ export default function VoiceVisit() {
                                     <Icon size={12} className="text-teal-deep/60" />
                                     <span className="text-[0.68rem] font-semibold text-teal-deep/60">{t(f.label)}:</span>
                                     <span className="font-extrabold text-teal-deep">
-                                      {f.render ? f.render(f.value, t) : String(f.value)}
+                                      {(() => {
+                                        const v = f.value;
+                                        if (v === null || v === undefined || v === "" || (typeof v === "number" && Number.isNaN(v))) return t("vv.notMentioned", "Not mentioned");
+                                        const out = f.render ? f.render(v, t) : String(v);
+                                        if (out === null || out === undefined || out === "" || out === "NaN" || out === "undefined" || out === "null") return t("vv.notMentioned", "Not mentioned");
+                                        return out;
+                                      })()}
                                     </span>
                                   </div>
                                   <div className="flex items-center gap-1">
@@ -1552,10 +2092,12 @@ export default function VoiceVisit() {
                       </div>
                     </div>
                   </div>
-                )}
+                  );
+                })()}
               </div>
             )}
           </div>
+
         </div>
       </motion.div>
 
@@ -1596,7 +2138,7 @@ export default function VoiceVisit() {
 
       {/* honest labelling footer */}
       <p className="text-center text-[0.68rem] font-semibold tracking-wide text-teal-deep/40">
-        STT: Gnani Prisma · TTS: Gnani Timbre · mode: {mode}
+        STT: {voiceProvider || "determined on record"} · TTS: Gnani Timbre (live when available, browser fallback otherwise) · app mode: {mode}
       </p>
     </div>
   );

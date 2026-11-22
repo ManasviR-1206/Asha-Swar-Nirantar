@@ -25,9 +25,9 @@ export default function Stat({ label, value, icon: Icon, tone = "mint", sub, del
         {Icon && <Icon size={20} strokeWidth={2} />}
       </div>
       <div className="min-w-0">
-        <p className="truncate text-[0.68rem] font-bold uppercase tracking-wider text-teal-deep/50">{label}</p>
+        <p className="text-[0.68rem] font-bold uppercase tracking-wider text-teal-deep/50 leading-snug break-words">{label}</p>
         <p className="mt-0.5 text-2xl font-extrabold leading-none text-teal-deep">{value ?? "—"}</p>
-        {sub && <p className="mt-1 truncate text-[0.7rem] font-medium text-teal-deep/45">{sub}</p>}
+        {sub && <p className="mt-1 text-[0.7rem] font-medium text-teal-deep/45 leading-snug break-words">{sub}</p>}
       </div>
     </motion.div>
   );

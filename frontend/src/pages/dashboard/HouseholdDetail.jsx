@@ -13,6 +13,10 @@ import {
   Droplets,
   ShieldCheck,
   Waves,
+  MapPin,
+  LocateFixed,
+  Loader2,
+  CheckCircle2,
 } from "lucide-react";
 import { api } from "../../lib/api.js";
 import { showToast } from "../../components/ui/Toast.jsx";
@@ -52,6 +56,10 @@ export default function HouseholdDetail() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [qr, setQr] = useState(null);
+  const [locBusy, setLocBusy] = useState(false);
+  const [manualLat, setManualLat] = useState("");
+  const [manualLng, setManualLng] = useState("");
+  const [manualNote, setManualNote] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -72,6 +80,57 @@ export default function HouseholdDetail() {
   useEffect(() => {
     load();
   }, [load]);
+
+  const saveLocation = async (latitude, longitude, location_source, verification_note = "") => {
+    setLocBusy(true);
+    try {
+      const res = await api.patch(`/households/${id}/location`, {
+        latitude,
+        longitude,
+        location_source,
+        verification_note,
+      });
+      showToast("Household location saved (actual coordinates only).", "success");
+      setData((d) => d ? { ...d, household: { ...d.household, ...res } } : d);
+    } catch (e) {
+      showToast(e.message || "Could not save location.", "error");
+    } finally {
+      setLocBusy(false);
+    }
+  };
+
+  const captureLocation = () => {
+    if (!navigator.geolocation) {
+      showToast("GPS/geolocation is not available on this device/browser.", "warn");
+      return;
+    }
+    setLocBusy(true);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        await saveLocation(lat, lng, "gps", "Captured from device GPS with worker permission.");
+      },
+      (err) => {
+        setLocBusy(false);
+        const msg = err?.code === 1
+          ? "Location permission denied. You can enter verified coordinates manually."
+          : "Location unavailable. Check GPS/settings and try again, or use manual verified entry.";
+        showToast(msg, "warn");
+      },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
+    );
+  };
+
+  const submitManualLocation = async () => {
+    const lat = parseFloat(manualLat);
+    const lng = parseFloat(manualLng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      showToast("Enter valid latitude and longitude.", "warn");
+      return;
+    }
+    await saveLocation(lat, lng, "manual_verified", manualNote || "Manually entered and verified by worker.");
+  };
 
   if (loading) {
     return (
@@ -121,6 +180,9 @@ export default function HouseholdDetail() {
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-xl font-extrabold text-teal-deep">{household.village}</h2>
               <span className="font-mono text-xs font-bold tracking-wider text-teal-deep/45">{household.qr_id}</span>
+              {household.data_origin === "synthetic_demo" && (
+                <span className="chip bg-amber-100 text-amber-900 border border-amber-200">SYNTHETIC DEMO DATA</span>
+              )}
             </div>
             <p className="mt-0.5 text-sm font-medium text-teal-deep/55">
               {household.address || "—"} · <Users size={12} className="inline" /> {t("households.members")}: {household.member_count}
@@ -140,6 +202,33 @@ export default function HouseholdDetail() {
             <Mic size={16} strokeWidth={2.4} /> {t("households.startVoiceVisit")}
           </button>
         </div>
+      </div>
+
+      <div className="card-ivory p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-extrabold uppercase tracking-[0.12em] text-teal-deep/45">GeoPulse Location</p>
+            <p className="mt-1 text-sm font-semibold text-teal-deep">
+              {household.latitude != null && household.longitude != null
+                ? `Stored coordinates: ${Number(household.latitude).toFixed(5)}, ${Number(household.longitude).toFixed(5)}`
+                : "No stored coordinates. Use GPS capture or manual verified entry."}
+            </p>
+            <p className="text-[11px] text-teal-deep/55">
+              Source: {household.location_source || "not set"} {household.location_updated_at ? `· Updated ${household.location_updated_at}` : ""}
+            </p>
+          </div>
+          <button onClick={captureLocation} disabled={locBusy} className="btn-mint flex items-center gap-2 px-4 py-2.5 text-sm disabled:opacity-60">
+            {locBusy ? <Loader2 size={16} className="animate-spin" /> : <LocateFixed size={16} />}
+            Capture GPS Location
+          </button>
+        </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_1fr_auto]">
+          <input value={manualLat} onChange={(e) => setManualLat(e.target.value)} placeholder="Latitude" className="rounded-xl border border-teal-deep/10 px-3 py-2 text-sm" />
+          <input value={manualLng} onChange={(e) => setManualLng(e.target.value)} placeholder="Longitude" className="rounded-xl border border-teal-deep/10 px-3 py-2 text-sm" />
+          <button onClick={submitManualLocation} disabled={locBusy} className="btn-secondary px-4 py-2 text-sm disabled:opacity-60">Save Verified Manual</button>
+        </div>
+        <input value={manualNote} onChange={(e) => setManualNote(e.target.value)} placeholder="Verification note (optional)" className="mt-3 w-full rounded-xl border border-teal-deep/10 px-3 py-2 text-sm" />
+        <p className="mt-2 text-[11px] text-teal-deep/55">Permission-based GPS capture only. Coordinates are never fabricated. Manual entries should be verified before saving.</p>
       </div>
 
       <div className="grid gap-5 lg:grid-cols-3">
